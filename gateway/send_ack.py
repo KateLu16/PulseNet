@@ -411,6 +411,206 @@ def register_device_with_fastapi(
 
 
 # =====================================================
+# SUBMIT ANSWER TO FASTAPI
+# Raspberry Pi Gateway -> FastAPI
+# =====================================================
+
+def submit_answer_to_fastapi(
+    student_id,
+    device_mac,
+    question_id,
+    answer,
+    quiz_id=2,
+    sequence=1,
+):
+    device_mac = normalize_mac(device_mac)
+
+    payload = {
+        "student_id": student_id,
+        "device_mac": device_mac,
+        "quiz_id": quiz_id,
+        "question_id": question_id,
+        "answer": answer,
+        "sequence": sequence,
+    }
+
+    data = json.dumps(payload).encode("utf-8")
+
+    url = (
+        f"{FASTAPI_URL}"
+        "/api/responses/answer"
+    )
+
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+
+    print()
+    print("======================================")
+    print("[FASTAPI ANSWER]")
+    print("======================================")
+    print(f"URL     : {url}")
+    print(f"Payload : {json.dumps(payload)}")
+
+    try:
+        with urllib.request.urlopen(
+            request,
+            timeout=5,
+        ) as response:
+
+            response_body = response.read().decode(
+                "utf-8"
+            )
+
+            print(
+                f"HTTP    : {response.status}"
+            )
+
+            print(
+                f"Response: {response_body}"
+            )
+
+            if (
+                response.status < 200
+                or response.status >= 300
+            ):
+                print(
+                    "[ERROR] FastAPI rejected answer."
+                )
+
+                print(
+                    "======================================"
+                )
+
+                return False, None
+
+            try:
+                result = json.loads(
+                    response_body
+                )
+
+            except json.JSONDecodeError as e:
+                print(
+                    "[ERROR] Invalid JSON response "
+                    "from FastAPI."
+                )
+
+                print(
+                    f"Reason: {e}"
+                )
+
+                print(
+                    "======================================"
+                )
+
+                return False, None
+
+            if result.get("success") is not True:
+                print(
+                    "[ERROR] FastAPI did not accept "
+                    "the answer."
+                )
+
+                print(
+                    f"[ERROR] Reason: "
+                    f"{result.get('status', 'UNKNOWN')}"
+                )
+
+                print(
+                    "======================================"
+                )
+
+                return False, result
+
+            print(
+                "[OK] Answer accepted by FastAPI."
+            )
+
+            print(
+                f"[RESULT] "
+                f"{'CORRECT' if result.get('correct') else 'WRONG'}"
+            )
+
+            print(
+                "======================================"
+            )
+
+            return True, result
+
+    except urllib.error.HTTPError as e:
+
+        error_body = e.read().decode(
+            "utf-8",
+            errors="replace",
+        )
+
+        print(
+            f"[ERROR] FastAPI HTTP error: "
+            f"{e.code}"
+        )
+
+        print(
+            f"Response: {error_body}"
+        )
+
+        print(
+            "======================================"
+        )
+
+        try:
+            error_json = json.loads(
+                error_body
+            )
+        except json.JSONDecodeError:
+            error_json = None
+
+        return False, error_json
+
+    except urllib.error.URLError as e:
+
+        print(
+            "[ERROR] Cannot connect to FastAPI."
+        )
+
+        print(
+            f"Reason: {e.reason}"
+        )
+
+        print(
+            "======================================"
+        )
+
+        return False, None
+
+    except Exception as e:
+
+        print(
+            "[ERROR] FastAPI answer request failed."
+        )
+
+        print(
+            f"Type  : {type(e).__name__}"
+        )
+
+        print(
+            f"Reason: {e}"
+        )
+
+        print(
+            "======================================"
+        )
+
+        return False, None
+
+
+
+# =====================================================
 # REGISTRATION PROCESS
 # ESP32 -> Raspberry Pi
 # =====================================================
@@ -673,7 +873,7 @@ def registration_callback(
 
 # =====================================================
 # ANSWER PROCESS
-# ESP32 -> Raspberry Pi
+# ESP32 -> Raspberry Pi -> FastAPI
 # =====================================================
 
 async def process_answer(
@@ -725,7 +925,7 @@ async def process_answer(
             "question_id",
             ""
         )
-    ).strip()
+    ).strip().upper()
 
     answer = str(
         packet.get(
@@ -776,7 +976,7 @@ async def process_answer(
         return
 
     # -------------------------------------------------
-    # REGISTRATION VALIDATION
+    # CHECK REGISTRATION
     # -------------------------------------------------
 
     if student_id not in registered_devices:
@@ -795,64 +995,118 @@ async def process_answer(
         return
 
     # -------------------------------------------------
-    # QUESTION VALIDATION
+    # GET REGISTERED DEVICE
     # -------------------------------------------------
 
-    if question_id not in QUESTIONS:
+    device_info = registered_devices[
+        student_id
+    ]
+
+    device_mac = normalize_mac(
+        device_info["device_mac"]
+    )
+
+    print(
+        f"Device MAC : {device_mac}"
+    )
+
+    # -------------------------------------------------
+    # SUBMIT TO FASTAPI
+    # -------------------------------------------------
+
+    success, result = (
+        submit_answer_to_fastapi(
+            student_id=student_id,
+            device_mac=device_mac,
+            question_id=question_id,
+            answer=answer,
+            quiz_id=2,
+            sequence=1,
+        )
+    )
+
+    # -------------------------------------------------
+    # FASTAPI REJECTED
+    # -------------------------------------------------
+
+    if not success:
 
         print(
-            f"[ERROR] Unknown question: "
-            f"{question_id}"
+            "[ERROR] Answer rejected by FastAPI."
         )
+
+        reason = (
+            "SERVER_ANSWER_FAILED"
+        )
+
+        if result is not None:
+
+            detail = result.get(
+                "detail"
+            )
+
+            if detail:
+                reason = str(detail)
+
+            else:
+
+                message_from_server = (
+                    result.get("message")
+                )
+
+                if message_from_server:
+                    reason = str(
+                        message_from_server
+                    )
 
         await send_answer_ack(
             client,
             question_id,
             "REJECTED",
-            "UNKNOWN_QUESTION"
+            reason
         )
 
         return
 
     # -------------------------------------------------
-    # CHECK ANSWER
+    # GET RESULT FROM FASTAPI
     # -------------------------------------------------
 
-    correct_answer = QUESTIONS[
-        question_id
-    ]["correct_answer"]
+    is_correct = bool(
+        result.get(
+            "correct",
+            False
+        )
+    )
 
-    is_correct = (
-        answer == correct_answer
+    status = result.get(
+        "status",
+        "ACCEPTED"
     )
 
     print()
+    print("======================================")
+    print("[ANSWER RESULT]")
+    print("======================================")
     print(
-        f"Correct answer: "
-        f"{correct_answer}"
+        f"Status : {status}"
     )
-
     print(
-        f"Student answer: "
-        f"{answer}"
-    )
-
-    print(
-        f"Result        : "
+        f"Result : "
         f"{'CORRECT' if is_correct else 'WRONG'}"
     )
+    print("======================================")
 
     # -------------------------------------------------
-    # ACCEPT ANSWER
+    # SEND ACK BACK TO ESP32
     # -------------------------------------------------
 
     await send_answer_ack(
         client,
         question_id,
         "ACCEPTED",
-        correct=bool(is_correct)
+        correct=is_correct
     )
-
 
 # =====================================================
 # ANSWER CALLBACK
