@@ -38,8 +38,19 @@ Adafruit_ST7735 tft(TFT_CS, TFT_DC, TFT_RST);
 #define COL3 33
 #define COL4 32
 
-const uint8_t rowPins[4] = {ROW1, ROW2, ROW3, ROW4};
-const uint8_t colPins[4] = {COL1, COL2, COL3, COL4};
+const uint8_t rowPins[4] = {
+    ROW1,
+    ROW2,
+    ROW3,
+    ROW4
+};
+
+const uint8_t colPins[4] = {
+    COL1,
+    COL2,
+    COL3,
+    COL4
+};
 
 const char keyMap[4][4] = {
     {'1', '2', '3', 'A'},
@@ -53,7 +64,17 @@ const char keyMap[4][4] = {
 // =====================================================
 
 String studentID = "";
+
 const size_t MAX_ID_LENGTH = 10;
+
+// =====================================================
+// CURRENT QUESTION
+// =====================================================
+
+// Question ID received from Raspberry Pi.
+// Example: Q01, Q02, Q03...
+
+String currentQuestionID = "";
 
 // =====================================================
 // BLE UUID
@@ -113,6 +134,7 @@ class ServerCallbacks : public BLEServerCallbacks
         Serial.println("================================");
 
         delay(100);
+
         BLEDevice::startAdvertising();
 
         Serial.println("BLE advertising restarted.");
@@ -176,6 +198,34 @@ class QuestionCallbacks : public BLECharacteristicCallbacks
         Serial.println(question);
         Serial.println("==============================");
 
+        // -------------------------------------------------
+        // Extract question_id from JSON
+        // -------------------------------------------------
+
+        int idStart = question.indexOf("\"question_id\":\"");
+
+        if (idStart >= 0)
+        {
+            idStart += strlen("\"question_id\":\"");
+
+            int idEnd = question.indexOf("\"", idStart);
+
+            if (idEnd > idStart)
+            {
+                currentQuestionID = question.substring(
+                    idStart,
+                    idEnd
+                );
+
+                Serial.print("Current Question ID: ");
+                Serial.println(currentQuestionID);
+            }
+        }
+
+        // -------------------------------------------------
+        // Display question
+        // -------------------------------------------------
+
         tft.fillScreen(ST77XX_BLACK);
 
         tft.setTextColor(ST77XX_CYAN);
@@ -199,9 +249,17 @@ char readKeypad()
     for (int row = 0; row < 4; row++)
     {
         for (int i = 0; i < 4; i++)
-            digitalWrite(rowPins[i], HIGH);
+        {
+            digitalWrite(
+                rowPins[i],
+                HIGH
+            );
+        }
 
-        digitalWrite(rowPins[row], LOW);
+        digitalWrite(
+            rowPins[row],
+            LOW
+        );
 
         for (int col = 0; col < 4; col++)
         {
@@ -211,11 +269,15 @@ char readKeypad()
 
                 // Confirm the key is still pressed.
                 if (digitalRead(colPins[col]) != LOW)
+                {
                     continue;
+                }
 
                 // Wait until release so one press = one key event.
                 while (digitalRead(colPins[col]) == LOW)
+                {
                     delay(1);
+                }
 
                 return keyMap[row][col];
             }
@@ -231,7 +293,13 @@ char readKeypad()
 
 void displayStudentID()
 {
-    tft.fillRect(0, 42, 128, 38, ST77XX_BLACK);
+    tft.fillRect(
+        0,
+        42,
+        128,
+        38,
+        ST77XX_BLACK
+    );
 
     tft.setTextColor(ST77XX_WHITE);
     tft.setTextSize(1);
@@ -278,10 +346,12 @@ void displayReady()
 }
 
 // =====================================================
-// DISPLAY SENDING
+// DISPLAY REGISTRATION STATUS
 // =====================================================
 
-void displayRegistrationStatus(const char* status)
+void displayRegistrationStatus(
+    const char* status
+)
 {
     tft.fillScreen(ST77XX_BLACK);
 
@@ -316,42 +386,78 @@ bool sendRegistration()
     Serial.println();
     Serial.println("========== REGISTRATION ==========");
     Serial.print("BLE connected: ");
-    Serial.println(deviceConnected ? "YES" : "NO");
+    Serial.println(
+        deviceConnected ? "YES" : "NO"
+    );
 
     if (!deviceConnected)
     {
-        Serial.println("ERROR: Raspberry Pi is not connected.");
-        Serial.println("Registration cannot be sent.");
+        Serial.println(
+            "ERROR: Raspberry Pi is not connected."
+        );
 
-        displayRegistrationStatus("BLE NOT CONNECTED");
+        Serial.println(
+            "Registration cannot be sent."
+        );
+
+        displayRegistrationStatus(
+            "BLE NOT CONNECTED"
+        );
+
         return false;
     }
 
     if (registrationCharacteristic == nullptr)
     {
-        Serial.println("ERROR: Registration characteristic is NULL.");
-        displayRegistrationStatus("BLE ERROR");
+        Serial.println(
+            "ERROR: Registration characteristic is NULL."
+        );
+
+        displayRegistrationStatus(
+            "BLE ERROR"
+        );
+
         return false;
     }
 
-    String macAddress = BLEDevice::getAddress().toString().c_str();
+    String macAddress =
+        BLEDevice::getAddress()
+            .toString()
+            .c_str();
 
     String packet =
         "{\"type\":\"REGISTER\","
-        "\"student_id\":\"" + studentID + "\","
+        "\"student_id\":\"" +
+        studentID +
+        "\","
         "\"device_name\":\"" DEVICE_NAME "\","
-        "\"device_mac\":\"" + macAddress + "\"}";
+        "\"device_mac\":\"" +
+        macAddress +
+        "\"}";
 
-    Serial.println("Sending registration packet:");
+    Serial.println(
+        "Sending registration packet:"
+    );
+
     Serial.println(packet);
 
-    registrationCharacteristic->setValue(packet.c_str());
+    registrationCharacteristic->setValue(
+        packet.c_str()
+    );
+
     registrationCharacteristic->notify();
 
-    Serial.println("Registration notify sent.");
-    Serial.println("==================================");
+    Serial.println(
+        "Registration notify sent."
+    );
 
-    displayRegistrationStatus("SENT TO GATEWAY");
+    Serial.println(
+        "=================================="
+    );
+
+    displayRegistrationStatus(
+        "SENT TO GATEWAY"
+    );
 
     return true;
 }
@@ -365,20 +471,54 @@ bool sendAnswer(char answer)
 {
     if (!deviceConnected)
     {
-        Serial.println("ERROR: BLE gateway not connected.");
+        Serial.println(
+            "ERROR: BLE gateway not connected."
+        );
+
         return false;
     }
 
     if (answerCharacteristic == nullptr)
     {
-        Serial.println("ERROR: Answer characteristic is NULL.");
+        Serial.println(
+            "ERROR: Answer characteristic is NULL."
+        );
+
         return false;
     }
 
+    // -------------------------------------------------
+    // Make sure a question has been received
+    // -------------------------------------------------
+
+    if (currentQuestionID.length() == 0)
+    {
+        Serial.println(
+            "ERROR: No current question."
+        );
+
+        Serial.println(
+            "Cannot send answer."
+        );
+
+        return false;
+    }
+
+    // -------------------------------------------------
+    // Build ANSWER packet
+    // -------------------------------------------------
+
     String packet =
         "{\"type\":\"ANSWER\","
-        "\"student_id\":\"" + studentID + "\","
-        "\"answer\":\"" + String(answer) + "\"}";
+        "\"student_id\":\"" +
+        studentID +
+        "\","
+        "\"question_id\":\"" +
+        currentQuestionID +
+        "\","
+        "\"answer\":\"" +
+        String(answer) +
+        "\"}";
 
     Serial.println();
     Serial.println("========== BLE TX ==========");
@@ -386,7 +526,10 @@ bool sendAnswer(char answer)
     Serial.println(packet);
     Serial.println("============================");
 
-    answerCharacteristic->setValue(packet.c_str());
+    answerCharacteristic->setValue(
+        packet.c_str()
+    );
+
     answerCharacteristic->notify();
 
     return true;
@@ -401,9 +544,14 @@ void setupBLE()
     Serial.println();
     Serial.println("Starting BLE...");
 
-    BLEDevice::init(DEVICE_NAME);
+    BLEDevice::init(
+        DEVICE_NAME
+    );
 
-    String macAddress = BLEDevice::getAddress().toString().c_str();
+    String macAddress =
+        BLEDevice::getAddress()
+            .toString()
+            .c_str();
 
     Serial.print("Device Name : ");
     Serial.println(DEVICE_NAME);
@@ -411,13 +559,23 @@ void setupBLE()
     Serial.print("BLE MAC     : ");
     Serial.println(macAddress);
 
-    bleServer = BLEDevice::createServer();
-    bleServer->setCallbacks(new ServerCallbacks());
+    bleServer =
+        BLEDevice::createServer();
+
+    bleServer->setCallbacks(
+        new ServerCallbacks()
+    );
 
     BLEService* service =
-        bleServer->createService(PULSENET_SERVICE_UUID);
+        bleServer->createService(
+            PULSENET_SERVICE_UUID
+        );
 
+    // -------------------------------------------------
     // ESP32 -> Pi
+    // Registration
+    // -------------------------------------------------
+
     registrationCharacteristic =
         service->createCharacteristic(
             REGISTRATION_CHAR_UUID,
@@ -425,9 +583,15 @@ void setupBLE()
             BLECharacteristic::PROPERTY_NOTIFY
         );
 
-    registrationCharacteristic->addDescriptor(new BLE2902());
+    registrationCharacteristic->addDescriptor(
+        new BLE2902()
+    );
 
+    // -------------------------------------------------
     // Pi -> ESP32
+    // Question
+    // -------------------------------------------------
+
     questionCharacteristic =
         service->createCharacteristic(
             QUESTION_CHAR_UUID,
@@ -435,9 +599,15 @@ void setupBLE()
             BLECharacteristic::PROPERTY_WRITE
         );
 
-    questionCharacteristic->setCallbacks(new QuestionCallbacks());
+    questionCharacteristic->setCallbacks(
+        new QuestionCallbacks()
+    );
 
+    // -------------------------------------------------
     // ESP32 -> Pi
+    // Answer
+    // -------------------------------------------------
+
     answerCharacteristic =
         service->createCharacteristic(
             ANSWER_CHAR_UUID,
@@ -445,9 +615,15 @@ void setupBLE()
             BLECharacteristic::PROPERTY_NOTIFY
         );
 
-    answerCharacteristic->addDescriptor(new BLE2902());
+    answerCharacteristic->addDescriptor(
+        new BLE2902()
+    );
 
+    // -------------------------------------------------
     // Pi -> ESP32
+    // ACK
+    // -------------------------------------------------
+
     ackCharacteristic =
         service->createCharacteristic(
             ACK_CHAR_UUID,
@@ -455,21 +631,45 @@ void setupBLE()
             BLECharacteristic::PROPERTY_WRITE
         );
 
-    ackCharacteristic->setCallbacks(new ACKCallbacks());
+    ackCharacteristic->setCallbacks(
+        new ACKCallbacks()
+    );
+
+    // -------------------------------------------------
+    // Start BLE service
+    // -------------------------------------------------
 
     service->start();
 
-    BLEAdvertising* advertising = BLEDevice::getAdvertising();
+    BLEAdvertising* advertising =
+        BLEDevice::getAdvertising();
 
-    advertising->addServiceUUID(PULSENET_SERVICE_UUID);
-    advertising->setScanResponse(true);
-    advertising->setMinPreferred(0x06);
-    advertising->setMinPreferred(0x12);
+    advertising->addServiceUUID(
+        PULSENET_SERVICE_UUID
+    );
+
+    advertising->setScanResponse(
+        true
+    );
+
+    advertising->setMinPreferred(
+        0x06
+    );
+
+    advertising->setMinPreferred(
+        0x12
+    );
 
     BLEDevice::startAdvertising();
 
-    Serial.println("BLE initialized.");
-    Serial.println("Advertising started.");
+    Serial.println(
+        "BLE initialized."
+    );
+
+    Serial.println(
+        "Advertising started."
+    );
+
     Serial.println();
 }
 
@@ -480,43 +680,96 @@ void setupBLE()
 void setup()
 {
     Serial.begin(115200);
+
     delay(1000);
 
     Serial.println();
-    Serial.println("================================");
-    Serial.println("PulseNet Student Device");
-    Serial.println("ESP32 + ST7735S + Keypad + BLE");
-    Serial.println("================================");
+    Serial.println(
+        "================================"
+    );
 
+    Serial.println(
+        "PulseNet Student Device"
+    );
+
+    Serial.println(
+        "ESP32 + ST7735S + Keypad + BLE"
+    );
+
+    Serial.println(
+        "================================"
+    );
+
+    // -------------------------------------------------
     // TFT
-    Serial.println("Starting ST7735S 128x128...");
+    // -------------------------------------------------
 
-    tft.initR(INITR_144GREENTAB);
+    Serial.println(
+        "Starting ST7735S 128x128..."
+    );
+
+    tft.initR(
+        INITR_144GREENTAB
+    );
+
     tft.setRotation(0);
-    tft.fillScreen(ST77XX_BLACK);
 
-    Serial.println("TFT initialized");
+    tft.fillScreen(
+        ST77XX_BLACK
+    );
 
+    Serial.println(
+        "TFT initialized"
+    );
+
+    // -------------------------------------------------
     // Keypad
+    // -------------------------------------------------
+
     for (int i = 0; i < 4; i++)
     {
-        pinMode(rowPins[i], OUTPUT);
-        digitalWrite(rowPins[i], HIGH);
+        pinMode(
+            rowPins[i],
+            OUTPUT
+        );
+
+        digitalWrite(
+            rowPins[i],
+            HIGH
+        );
     }
 
     for (int i = 0; i < 4; i++)
-        pinMode(colPins[i], INPUT_PULLUP);
+    {
+        pinMode(
+            colPins[i],
+            INPUT_PULLUP
+        );
+    }
 
-    Serial.println("Keypad initialized");
+    Serial.println(
+        "Keypad initialized"
+    );
 
+    // -------------------------------------------------
     // BLE
+    // -------------------------------------------------
+
     setupBLE();
 
+    // -------------------------------------------------
     // Start screen
+    // -------------------------------------------------
+
     displayReady();
 
-    Serial.println("System ready.");
-    Serial.println("Enter Student ID...");
+    Serial.println(
+        "System ready."
+    );
+
+    Serial.println(
+        "Enter Student ID..."
+    );
 }
 
 // =====================================================
@@ -529,73 +782,150 @@ void loop()
 
     if (key != '\0')
     {
-        Serial.print("Key pressed: ");
+        Serial.print(
+            "Key pressed: "
+        );
+
         Serial.println(key);
 
+        // -------------------------------------------------
         // NUMBER
-        if (key >= '0' && key <= '9')
+        // -------------------------------------------------
+
+        if (
+            key >= '0' &&
+            key <= '9'
+        )
         {
-            if (studentID.length() < MAX_ID_LENGTH)
+            if (
+                studentID.length()
+                < MAX_ID_LENGTH
+            )
             {
                 studentID += key;
+
                 displayStudentID();
             }
             else
             {
-                Serial.println("Student ID: maximum length reached.");
+                Serial.println(
+                    "Student ID: maximum length reached."
+                );
             }
         }
 
+        // -------------------------------------------------
         // CLEAR
+        // -------------------------------------------------
+
         else if (key == '*')
         {
             studentID = "";
+
             displayStudentID();
-            Serial.println("Student ID cleared");
+
+            Serial.println(
+                "Student ID cleared"
+            );
         }
 
+        // -------------------------------------------------
         // CONFIRM + SEND REGISTER
+        // -------------------------------------------------
+
         else if (key == '#')
         {
-            if (studentID.length() == 0)
+            if (
+                studentID.length() == 0
+            )
             {
-                Serial.println("Student ID is empty. Nothing to send.");
-                displayRegistrationStatus("ENTER STUDENT ID");
+                Serial.println(
+                    "Student ID is empty. Nothing to send."
+                );
+
+                displayRegistrationStatus(
+                    "ENTER STUDENT ID"
+                );
+
                 delay(1000);
+
                 displayReady();
             }
             else
             {
-                Serial.println("==========================");
-                Serial.print("Student ID confirmed: ");
-                Serial.println(studentID);
-                Serial.println("==========================");
+                Serial.println(
+                    "=========================="
+                );
+
+                Serial.print(
+                    "Student ID confirmed: "
+                );
+
+                Serial.println(
+                    studentID
+                );
+
+                Serial.println(
+                    "=========================="
+                );
 
                 sendRegistration();
             }
         }
 
+        // -------------------------------------------------
         // ANSWER
-        else if (key >= 'A' && key <= 'D')
+        // -------------------------------------------------
+
+        else if (
+            key >= 'A' &&
+            key <= 'D'
+        )
         {
-            Serial.print("Answer selected: ");
+            Serial.print(
+                "Answer selected: "
+            );
+
             Serial.println(key);
 
-            tft.fillScreen(ST77XX_BLACK);
+            tft.fillScreen(
+                ST77XX_BLACK
+            );
 
-            tft.setTextColor(ST77XX_WHITE);
+            tft.setTextColor(
+                ST77XX_WHITE
+            );
+
             tft.setTextSize(1);
-            tft.setCursor(10, 15);
-            tft.println("ANSWER SELECTED");
 
-            tft.setTextColor(ST77XX_YELLOW);
+            tft.setCursor(
+                10,
+                15
+            );
+
+            tft.println(
+                "ANSWER SELECTED"
+            );
+
+            tft.setTextColor(
+                ST77XX_YELLOW
+            );
+
             tft.setTextSize(4);
-            tft.setCursor(50, 45);
+
+            tft.setCursor(
+                50,
+                45
+            );
+
             tft.println(key);
 
+            // Send answer together with
+            // currentQuestionID.
             sendAnswer(key);
 
             delay(1000);
+
             displayReady();
         }
     }
