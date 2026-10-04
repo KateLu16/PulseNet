@@ -1,8 +1,12 @@
 from fastapi import FastAPI
+
+from app.models.quiz_registration import QuizRegistration
+
 from app.api.quizzes import router as quizzes_router
 from app.api.devices import router as devices_router
 from app.api.questions import router as questions_router
 from app.api.responses import router as responses_router
+
 
 app = FastAPI(
     title="PulseNet Backend",

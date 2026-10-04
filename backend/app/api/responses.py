@@ -7,6 +7,7 @@ from app.database import get_db
 from app.models.device import Device
 from app.models.question import Question
 from app.models.quiz import Quiz
+from app.models.quiz_registration import QuizRegistration
 from app.models.response import Response
 from app.models.student import Student
 from app.schemas.response import (
@@ -21,6 +22,10 @@ router = APIRouter(
 )
 
 
+# ============================================================
+# QUESTION ID PARSER
+# ============================================================
+
 def parse_question_number(question_id: str) -> int:
     value = question_id.strip().upper()
 
@@ -29,6 +34,7 @@ def parse_question_number(question_id: str) -> int:
 
     try:
         number = int(value)
+
     except ValueError:
         raise HTTPException(
             status_code=400,
@@ -44,6 +50,10 @@ def parse_question_number(question_id: str) -> int:
     return number
 
 
+# ============================================================
+# SUBMIT ANSWER
+# ============================================================
+
 @router.post(
     "/answer",
     response_model=AnswerResponse,
@@ -52,11 +62,12 @@ def submit_answer(
     data: AnswerCreateRequest,
     db: Session = Depends(get_db),
 ):
+
     answer = data.answer.upper()
 
-    # --------------------------------------------------------
-    # 1. Check device
-    # --------------------------------------------------------
+    # ========================================================
+    # 1. CHECK DEVICE
+    # ========================================================
 
     device = (
         db.query(Device)
@@ -66,20 +77,20 @@ def submit_answer(
         .first()
     )
 
-    if device is None or device.student_id is None:
+    if device is None:
         raise HTTPException(
             status_code=400,
-            detail="Device is not registered",
+            detail="Device not found",
         )
 
-    # --------------------------------------------------------
-    # 2. Check student-device relationship
-    # --------------------------------------------------------
+    # ========================================================
+    # 2. CHECK STUDENT
+    # ========================================================
 
     student = (
         db.query(Student)
         .filter(
-            Student.id == device.student_id
+            Student.student_id == data.student_id
         )
         .first()
     )
@@ -87,18 +98,12 @@ def submit_answer(
     if student is None:
         raise HTTPException(
             status_code=400,
-            detail="Registered student not found",
+            detail="Student not found",
         )
 
-    if student.student_id != data.student_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Student ID does not match registered device",
-        )
-
-    # --------------------------------------------------------
-    # 3. Check quiz
-    # --------------------------------------------------------
+    # ========================================================
+    # 3. CHECK QUIZ
+    # ========================================================
 
     quiz = (
         db.query(Quiz)
@@ -114,29 +119,78 @@ def submit_answer(
             detail="Quiz not found",
         )
 
+    # ========================================================
+    # 4. CHECK QUIZ STATUS
+    # ========================================================
+
     if quiz.status != "running":
         raise HTTPException(
             status_code=400,
             detail="Quiz is not running",
         )
 
-    # --------------------------------------------------------
-    # 4. Convert Q01 -> question number 1
-    # --------------------------------------------------------
+    # ========================================================
+    # 5. CHECK QUIZ REGISTRATION
+    #
+    # Student and Device must be associated specifically
+    # within this quiz.
+    #
+    # This replaces the old logic:
+    #
+    #     Device.student_id
+    #
+    # A physical device can therefore be reused by another
+    # student in another quiz/session.
+    # ========================================================
+
+    registration = (
+        db.query(QuizRegistration)
+        .filter(
+            QuizRegistration.quiz_id
+            == data.quiz_id,
+
+            QuizRegistration.device_id
+            == device.id,
+
+            QuizRegistration.student_id
+            == student.id,
+        )
+        .first()
+    )
+
+    if registration is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Student is not registered "
+                "to this device for this quiz"
+            ),
+        )
+
+    # ========================================================
+    # 6. CONVERT QUESTION ID
+    #
+    # Examples:
+    #
+    #     Q01 -> 1
+    #     Q02 -> 2
+    #     1   -> 1
+    # ========================================================
 
     question_number = parse_question_number(
         data.question_id
     )
 
-    # --------------------------------------------------------
-    # 5. Find question
-    # --------------------------------------------------------
+    # ========================================================
+    # 7. FIND QUESTION
+    # ========================================================
 
     question = (
         db.query(Question)
         .filter(
             Question.quiz_id == data.quiz_id,
-            Question.question_number == question_number,
+            Question.question_number
+            == question_number,
         )
         .first()
     )
@@ -147,9 +201,9 @@ def submit_answer(
             detail="Question does not belong to this quiz",
         )
 
-    # --------------------------------------------------------
-    # 6. Check current question
-    # --------------------------------------------------------
+    # ========================================================
+    # 8. CHECK CURRENT QUESTION
+    # ========================================================
 
     if (
         quiz.current_question_number is not None
@@ -161,17 +215,18 @@ def submit_answer(
             detail="Question is not the current quiz question",
         )
 
-    # --------------------------------------------------------
-    # 7. Check answer
-    # --------------------------------------------------------
+    # ========================================================
+    # 9. CHECK ANSWER
+    # ========================================================
 
     is_correct = (
-        answer == question.correct_answer.upper()
+        answer
+        == question.correct_answer.upper()
     )
 
-    # --------------------------------------------------------
-    # 8. Save response
-    # --------------------------------------------------------
+    # ========================================================
+    # 10. SAVE RESPONSE
+    # ========================================================
 
     response = Response(
         quiz_id=data.quiz_id,
@@ -186,16 +241,24 @@ def submit_answer(
 
     db.add(response)
 
-    # Update device activity
+    # ========================================================
+    # 11. UPDATE DEVICE ACTIVITY
+    # ========================================================
+
     device.status = "online"
     device.last_seen = datetime.utcnow()
 
+    # ========================================================
+    # 12. COMMIT
+    # ========================================================
+
     db.commit()
+
     db.refresh(response)
 
-    # --------------------------------------------------------
-    # 9. Return result
-    # --------------------------------------------------------
+    # ========================================================
+    # 13. RETURN RESULT
+    # ========================================================
 
     return AnswerResponse(
         success=True,
