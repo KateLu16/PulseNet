@@ -1,14 +1,16 @@
 import asyncio
 import json
-from bleak import BleakClient
+import urllib.error
+import urllib.request
 
+from bleak import BleakClient
 
 # =====================================================
 # DEVICE
 # =====================================================
 
 DEVICE_ADDRESS = "54:43:B2:DC:B0:B2"
-
+FASTAPI_URL = "http://127.0.0.1:8000"
 
 # =====================================================
 # BLE UUID
@@ -37,8 +39,7 @@ QUESTIONS = {
     "Q01": {
         "question": "Which protocol is low power?",
         "A": "BLE",
-        "B": "WiFi",
-        "C": "HTTP",
+        "B": "WiFi",        "C": "HTTP",
         "D": "FTP",
         "correct_answer": "A",
     },
@@ -165,6 +166,125 @@ async def send_answer_ack(
         json.dumps(packet, separators=(",", ":"))
     )
 
+# =====================================================
+# REGISTER DEVICE WITH FASTAPI
+# Raspberry Pi Gateway -> FastAPI
+# =====================================================
+
+def register_device_with_fastapi(
+    student_id,
+    device_mac,
+    device_name,
+):
+    payload = {
+        "student_id": student_id,
+        "device_mac": device_mac,
+        "device_code": device_name,
+    }
+
+    data = json.dumps(payload).encode("utf-8")
+
+    url = (
+        f"{FASTAPI_URL}"
+        "/api/devices/register"
+    )
+
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+
+    print()
+    print("======================================")
+    print("[FASTAPI REGISTER]")
+    print("======================================")
+    print(f"URL     : {url}")
+    print(f"Payload : {json.dumps(payload)}")
+
+    try:
+        with urllib.request.urlopen(
+            request,
+            timeout=5,
+        ) as response:
+
+            response_body = response.read().decode(
+                "utf-8"
+            )
+
+            print(
+                f"HTTP    : {response.status}"
+            )
+
+            print(
+                f"Response: {response_body}"
+            )
+
+            if response.status < 200 or response.status >= 300:
+                print(
+                    "[ERROR] FastAPI registration failed."
+                )
+                return False, None
+
+            result = json.loads(
+                response_body
+            )
+
+            print(
+                "[OK] Device registered "
+                "with FastAPI."
+            )
+            print("======================================")
+
+            return True, result
+
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode(
+            "utf-8",
+            errors="replace",
+        )
+
+        print(
+            f"[ERROR] FastAPI HTTP error: "
+            f"{e.code}"
+        )
+        print(
+            f"Response: {error_body}"
+        )
+        print("======================================")
+
+        return False, None
+
+    except urllib.error.URLError as e:
+        print(
+            "[ERROR] Cannot connect to FastAPI."
+        )
+        print(
+            f"Reason: {e.reason}"
+        )
+        print("======================================")
+
+        return False, None
+
+    except Exception as e:
+        print(
+            "[ERROR] FastAPI registration "
+            "request failed."
+        )
+        print(
+            f"Type  : {type(e).__name__}"
+        )
+        print(
+            f"Reason: {e}"
+        )
+        print("======================================")
+
+        return False, None
+
 
 # =====================================================
 # REGISTRATION PROCESS
@@ -234,6 +354,30 @@ async def process_registration(client, message):
             student_id,
             "REJECTED",
             "EMPTY_DEVICE_MAC"
+        )
+        return
+
+    # -------------------------------------------------
+    # REGISTER WITH FASTAPI
+    # -------------------------------------------------
+
+    success, result = register_device_with_fastapi(
+        student_id,
+        device_mac,
+        device_name,
+    )
+
+    if not success:
+        print(
+            "[ERROR] FastAPI rejected "
+            "device registration."
+        )
+
+        await send_register_ack(
+            client,
+            student_id,
+            "REJECTED",
+            "SERVER_REGISTRATION_FAILED"
         )
         return
 
