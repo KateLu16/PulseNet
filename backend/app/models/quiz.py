@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, String
+from sqlalchemy import DateTime, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -23,6 +23,11 @@ class Quiz(Base):
         String(20),
         default="draft",
         nullable=False,
+    )
+
+    current_question_number: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
     )
 
     created_at: Mapped[datetime] = mapped_column(

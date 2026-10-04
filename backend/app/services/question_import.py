@@ -16,19 +16,30 @@ EXPECTED_HEADERS = [
 ]
 
 
+# ============================================================
+# TEXT NORMALIZATION
+# ============================================================
+
 def normalize_text(value: str) -> str:
     """
-    Normalize text for duplicate comparison.
+    Normalize text for duplicate/conflict comparison.
 
-    Examples:
-        "What is BLE?"
-        " what is ble? "
+    Example:
+        " What is BLE? "
         "WHAT   IS   BLE?"
 
-    -> same normalized value
+    Both become:
+        "what is ble?"
     """
-    return " ".join(value.strip().lower().split())
 
+    return " ".join(
+        value.strip().lower().split()
+    )
+
+
+# ============================================================
+# QUESTION FINGERPRINT
+# ============================================================
 
 def question_fingerprint(
     question_text: str,
@@ -40,6 +51,8 @@ def question_fingerprint(
 ) -> tuple:
     """
     Create a normalized fingerprint for a complete question.
+
+    Used to detect exact duplicates.
     """
 
     return (
@@ -51,6 +64,10 @@ def question_fingerprint(
         correct_answer.upper(),
     )
 
+
+# ============================================================
+# IMPORT QUESTIONS FROM CSV
+# ============================================================
 
 def import_questions_from_csv(
     file,
@@ -64,9 +81,9 @@ def import_questions_from_csv(
 
     reader = csv.DictReader(text_file)
 
-    # ============================================================
+    # ========================================================
     # VALIDATE HEADER
-    # ============================================================
+    # ========================================================
 
     if reader.fieldnames != EXPECTED_HEADERS:
         return {
@@ -87,17 +104,23 @@ def import_questions_from_csv(
     errors = []
     duplicates = []
 
-    # Track questions appearing inside this CSV.
-    seen_questions = {}
+    # ========================================================
+    # LOAD EXISTING QUESTIONS FROM DATABASE
+    # ========================================================
 
-    # Track existing questions in this quiz.
     existing_questions = (
         db.query(Question)
-        .filter(Question.quiz_id == quiz_id)
+        .filter(
+            Question.quiz_id == quiz_id
+        )
         .all()
     )
 
+    # Exact question lookup
     existing_by_fingerprint = {}
+
+    # Question-text lookup
+    # Used to detect conflicts.
     existing_by_text = {}
 
     for existing in existing_questions:
@@ -119,26 +142,59 @@ def import_questions_from_csv(
 
         existing_by_text[normalized_text] = existing
 
-    # ============================================================
-    # VALIDATE ROWS
-    # ============================================================
+    # ========================================================
+    # DETERMINE NEXT QUESTION NUMBER
+    # ========================================================
 
-    for row_number, row in enumerate(reader, start=2):
+    if existing_questions:
 
-        question_text = row["Question"].strip()
+        max_question_number = max(
+            question.question_number
+            for question in existing_questions
+        )
+
+        next_question_number = (
+            max_question_number + 1
+        )
+
+    else:
+
+        next_question_number = 1
+
+    # ========================================================
+    # TRACK QUESTIONS INSIDE CURRENT CSV
+    # ========================================================
+
+    seen_questions = {}
+    seen_questions_by_text = {}
+
+    # ========================================================
+    # PROCESS CSV ROWS
+    # ========================================================
+
+    for row_number, row in enumerate(
+        reader,
+        start=2,
+    ):
+
+        question_text = (
+            row["Question"].strip()
+        )
+
         option_a = row["A"].strip()
         option_b = row["B"].strip()
         option_c = row["C"].strip()
         option_d = row["D"].strip()
+
         correct_answer = (
             row["Correct Answer"]
             .strip()
             .upper()
         )
 
-        # --------------------------------------------------------
-        # Empty field validation
-        # --------------------------------------------------------
+        # ====================================================
+        # VALIDATE REQUIRED FIELDS
+        # ====================================================
 
         fields = {
             "Question": question_text,
@@ -154,6 +210,7 @@ def import_questions_from_csv(
         for field_name, value in fields.items():
 
             if not value:
+
                 errors.append(
                     {
                         "row": row_number,
@@ -164,11 +221,16 @@ def import_questions_from_csv(
 
                 row_has_error = True
 
-        # --------------------------------------------------------
-        # Correct answer validation
-        # --------------------------------------------------------
+        # ====================================================
+        # VALIDATE CORRECT ANSWER
+        # ====================================================
 
-        if correct_answer not in {"A", "B", "C", "D"}:
+        if correct_answer not in {
+            "A",
+            "B",
+            "C",
+            "D",
+        }:
 
             errors.append(
                 {
@@ -180,16 +242,16 @@ def import_questions_from_csv(
 
             row_has_error = True
 
-        # --------------------------------------------------------
-        # Do not process duplicate/conflict if row is invalid
-        # --------------------------------------------------------
+        # ----------------------------------------------------
+        # Skip duplicate/conflict processing for invalid row
+        # ----------------------------------------------------
 
         if row_has_error:
             continue
 
-        # --------------------------------------------------------
-        # Create fingerprint
-        # --------------------------------------------------------
+        # ====================================================
+        # CREATE FINGERPRINT
+        # ====================================================
 
         fingerprint = question_fingerprint(
             question_text,
@@ -204,9 +266,9 @@ def import_questions_from_csv(
             question_text
         )
 
-        # ========================================================
+        # ====================================================
         # DUPLICATE INSIDE CURRENT CSV
-        # ========================================================
+        # ====================================================
 
         if fingerprint in seen_questions:
 
@@ -224,38 +286,37 @@ def import_questions_from_csv(
 
             continue
 
-        # ========================================================
+        # ====================================================
         # CONFLICT INSIDE CURRENT CSV
-        # ========================================================
+        # ====================================================
 
-        # Same question text but different options/answer.
-        previous_same_text = None
+        if normalized_text in seen_questions_by_text:
 
-        for previous_fingerprint, previous_row in seen_questions.items():
-
-            if previous_fingerprint[0] == normalized_text:
-                previous_same_text = previous_row
-                break
-
-        if previous_same_text is not None:
+            previous_row = (
+                seen_questions_by_text[
+                    normalized_text
+                ]
+            )
 
             errors.append(
                 {
                     "row": row_number,
                     "field": "Question",
                     "message": (
-                        "Question text already exists in this CSV "
-                        "with different options or correct answer. "
-                        f"Conflicts with row {previous_same_text}."
+                        "Question text already exists "
+                        "in this CSV with different "
+                        "options or correct answer. "
+                        f"Conflicts with row "
+                        f"{previous_row}."
                     ),
                 }
             )
 
             continue
 
-        # ========================================================
+        # ====================================================
         # DUPLICATE AGAINST DATABASE
-        # ========================================================
+        # ====================================================
 
         if fingerprint in existing_by_fingerprint:
 
@@ -264,50 +325,61 @@ def import_questions_from_csv(
                     "row": row_number,
                     "type": "duplicate",
                     "message": (
-                        "Question already exists in this quiz."
+                        "Question already exists "
+                        "in this quiz."
                     ),
                 }
             )
 
             continue
 
-        # ========================================================
+        # ====================================================
         # CONFLICT AGAINST DATABASE
-        # ========================================================
+        # ====================================================
 
         if normalized_text in existing_by_text:
 
-            existing = existing_by_text[
-                normalized_text
-            ]
+            existing = (
+                existing_by_text[
+                    normalized_text
+                ]
+            )
 
             errors.append(
                 {
                     "row": row_number,
                     "field": "Question",
                     "message": (
-                        "Question already exists in this quiz "
-                        "with different options or correct answer. "
-                        f"Existing question ID: {existing.id}."
+                        "Question already exists "
+                        "in this quiz with different "
+                        "options or correct answer. "
+                        f"Existing question ID: "
+                        f"{existing.id}."
                     ),
                 }
             )
 
             continue
 
-        # ========================================================
-        # MARK AS SEEN
-        # ========================================================
+        # ====================================================
+        # REGISTER QUESTION AS SEEN
+        # ====================================================
 
-        seen_questions[fingerprint] = row_number
+        seen_questions[fingerprint] = (
+            row_number
+        )
 
-        # ========================================================
+        seen_questions_by_text[
+            normalized_text
+        ] = row_number
+
+        # ====================================================
         # CREATE QUESTION OBJECT
-        # ========================================================
+        # ====================================================
 
         question = Question(
             quiz_id=quiz_id,
-            question_number=len(questions) + 1,
+            question_number=next_question_number,
             question_text=question_text,
             option_a=option_a,
             option_b=option_b,
@@ -318,9 +390,12 @@ def import_questions_from_csv(
 
         questions.append(question)
 
-    # ============================================================
-    # DO NOT PARTIALLY IMPORT WHEN VALIDATION ERRORS EXIST
-    # ============================================================
+        # Next question number
+        next_question_number += 1
+
+    # ========================================================
+    # DO NOT PARTIALLY IMPORT WHEN ERRORS EXIST
+    # ========================================================
 
     if errors:
 
@@ -329,8 +404,8 @@ def import_questions_from_csv(
             "message": "CSV validation failed",
             "total_rows": (
                 len(questions)
-                + len(errors)
                 + len(duplicates)
+                + len(errors)
             ),
             "valid_rows": len(questions),
             "imported": 0,
@@ -340,18 +415,18 @@ def import_questions_from_csv(
             "errors_details": errors,
         }
 
-    # ============================================================
+    # ========================================================
     # SAVE TO DATABASE
-    # ============================================================
+    # ========================================================
 
     if questions:
 
         db.add_all(questions)
         db.commit()
 
-    # ============================================================
+    # ========================================================
     # SUCCESS RESPONSE
-    # ============================================================
+    # ========================================================
 
     return {
         "success": True,
