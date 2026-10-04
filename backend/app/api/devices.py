@@ -48,7 +48,29 @@ def register_device(
         .first()
     )
 
-    # 4. Create or update device
+    # Check whether the device_code is already used by another device
+    if data.device_code is not None:
+        device_with_same_code = (
+            db.query(Device)
+            .filter(Device.device_code == data.device_code)
+            .first()
+        )
+
+        if (
+            device_with_same_code is not None
+            and (
+                device is None
+                or device_with_same_code.id != device.id
+            )
+        ):
+            return DeviceRegisterResponse(
+                success=False,
+                message="Device code is already registered to another device",
+                student_id=student.student_id,
+                device_mac=data.device_mac,
+                device_code=data.device_code,
+            )
+
     if device is None:
         device = Device(
             device_mac=data.device_mac,
@@ -56,9 +78,7 @@ def register_device(
             student_id=student.id,
             status="online",
         )
-
         db.add(device)
-
     else:
         device.student_id = student.id
         device.status = "online"
@@ -66,7 +86,7 @@ def register_device(
         if data.device_code is not None:
             device.device_code = data.device_code
 
-    db.commit()
+
     db.refresh(device)
 
     return DeviceRegisterResponse(
