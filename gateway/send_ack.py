@@ -1,13 +1,33 @@
 import asyncio
 import json
+import os
+from urllib import error, request
+
 from bleak import BleakClient
 
 
 # =====================================================
-# DEVICE
+# CONFIGURATION
 # =====================================================
 
-DEVICE_ADDRESS = "54:43:B2:DC:B0:B2"
+DEVICE_ADDRESS = os.getenv(
+    "PULSENET_DEVICE_ADDRESS",
+    "54:43:B2:DC:B0:B2",
+)
+
+API_BASE_URL = os.getenv(
+    "PULSENET_API_URL",
+    "http://127.0.0.1:8000",
+).rstrip("/")
+
+ACTIVE_QUIZ_ID = int(
+    os.getenv("PULSENET_QUIZ_ID", "1")
+)
+
+SESSION_ID = os.getenv(
+    "PULSENET_SESSION_ID",
+    f"QUIZ-{ACTIVE_QUIZ_ID}",
+)
 
 
 # =====================================================
@@ -28,46 +48,73 @@ ACK_CHAR_UUID = \
 
 
 # =====================================================
-# QUIZ DATA
+# RUNTIME STATE
 # =====================================================
 
-SESSION_ID = "S001"
-
-QUESTIONS = {
-    "Q01": {
-        "question": "Which protocol is low power?",
-        "A": "BLE",
-        "B": "WiFi",
-        "C": "HTTP",
-        "D": "FTP",
-        "correct_answer": "A",
-    },
-    "Q02": {
-        "question": "Which device acts as the gateway?",
-        "A": "TFT",
-        "B": "Keypad",
-        "C": "Raspberry Pi",
-        "D": "Battery",
-        "correct_answer": "C",
-    },
-}
-
-
-# =====================================================
-# RUNTIME REGISTRATION DATA
-# =====================================================
-
-# Student ID <-> device MAC mapping.
 registered_devices = {}
 
-# Latest registration received from the device.
 current_student_id = ""
 current_device_mac = ""
 current_device_name = ""
 
+current_client = None
+
 
 # =====================================================
-# HELPER - GET CHARACTERISTIC
+# HTTP API HELPERS
+# =====================================================
+
+def api_request(method, path, payload=None):
+    url = f"{API_BASE_URL}{path}"
+
+    data = None
+    headers = {}
+
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    req = request.Request(
+        url,
+        data=data,
+        headers=headers,
+        method=method,
+    )
+
+    try:
+        with request.urlopen(req, timeout=5) as response:
+            body = response.read().decode("utf-8")
+            return response.status, json.loads(body) if body else {}
+
+    except error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+
+        try:
+            detail = json.loads(body)
+        except json.JSONDecodeError:
+            detail = body
+
+        return exc.code, detail
+
+    except Exception as exc:
+        print(
+            f"[API ERROR] {method} {url}: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return None, None
+
+
+async def api_request_async(method, path, payload=None):
+    return await asyncio.to_thread(
+        api_request,
+        method,
+        path,
+        payload,
+    )
+
+
+# =====================================================
+# BLE HELPERS
 # =====================================================
 
 def get_characteristic(client, uuid):
@@ -81,11 +128,6 @@ def get_characteristic(client, uuid):
     return characteristic
 
 
-# =====================================================
-# SEND ACK
-# Raspberry Pi -> ESP32
-# =====================================================
-
 async def send_ack(client, message):
     data = message.encode("utf-8")
 
@@ -95,26 +137,27 @@ async def send_ack(client, message):
     print("======================================")
     print(message)
 
-    ack_char = get_characteristic(client, ACK_CHAR_UUID)
-
-    print(f"[INFO] ACK characteristic: {ack_char.uuid}")
-    print(f"[INFO] Properties: {ack_char.properties}")
+    ack_char = get_characteristic(
+        client,
+        ACK_CHAR_UUID,
+    )
 
     await client.write_gatt_char(
         ack_char,
         data,
-        response=True
+        response=True,
     )
 
     print("[OK] ACK sent.")
     print("======================================")
 
 
-# =====================================================
-# SEND REGISTER ACK
-# =====================================================
-
-async def send_register_ack(client, student_id, status, reason=None):
+async def send_register_ack(
+    client,
+    student_id,
+    status,
+    reason=None,
+):
     packet = {
         "type": "REGISTER_ACK",
         "session_id": SESSION_ID,
@@ -127,20 +170,16 @@ async def send_register_ack(client, student_id, status, reason=None):
 
     await send_ack(
         client,
-        json.dumps(packet, separators=(",", ":"))
+        json.dumps(packet, separators=(",", ":")),
     )
 
-
-# =====================================================
-# SEND ANSWER ACK
-# =====================================================
 
 async def send_answer_ack(
     client,
     question_id,
     status,
     reason=None,
-    correct=None
+    correct=None,
 ):
     packet = {
         "type": "ANSWER_ACK",
@@ -155,20 +194,15 @@ async def send_answer_ack(
     if reason:
         packet["reason"] = reason
 
-    print()
-    print("======================================")
-    print("[ANSWER ACK TX]")
-    print("======================================")
-
     await send_ack(
         client,
-        json.dumps(packet, separators=(",", ":"))
+        json.dumps(packet, separators=(",", ":")),
     )
 
 
 # =====================================================
-# REGISTRATION PROCESS
-# ESP32 -> Raspberry Pi
+# REGISTRATION
+# ESP32 -> Gateway -> FastAPI -> SQLite
 # =====================================================
 
 async def process_registration(client, message):
@@ -185,59 +219,89 @@ async def process_registration(client, message):
 
     try:
         packet = json.loads(message)
-    except json.JSONDecodeError as e:
-        print(f"[ERROR] Invalid JSON: {e}")
+    except json.JSONDecodeError as exc:
+        print(f"[ERROR] Invalid JSON: {exc}")
 
         await send_register_ack(
             client,
             "",
             "REJECTED",
-            "INVALID_JSON"
+            "INVALID_JSON",
         )
         return
 
     if packet.get("type") != "REGISTER":
-        print("[ERROR] Invalid registration type.")
-
         await send_register_ack(
             client,
             packet.get("student_id", ""),
             "REJECTED",
-            "INVALID_TYPE"
+            "INVALID_TYPE",
         )
         return
 
-    student_id = str(packet.get("student_id", "")).strip()
-    device_mac = str(packet.get("device_mac", "")).strip().lower()
-    device_name = str(packet.get("device_name", "")).strip()
+    student_id = str(
+        packet.get("student_id", "")
+    ).strip()
 
-    print(f"Student ID : {student_id}")
-    print(f"Device MAC : {device_mac}")
-    print(f"Device Name: {device_name}")
+    device_mac = str(
+        packet.get("device_mac", "")
+    ).strip().lower()
+
+    device_name = str(
+        packet.get("device_name", "")
+    ).strip()
 
     if not student_id:
-        print("[ERROR] Student ID is empty.")
-
         await send_register_ack(
             client,
             "",
             "REJECTED",
-            "EMPTY_STUDENT_ID"
+            "EMPTY_STUDENT_ID",
         )
         return
 
     if not device_mac:
-        print("[ERROR] Device MAC is empty.")
+        await send_register_ack(
+            client,
+            student_id,
+            "REJECTED",
+            "EMPTY_DEVICE_MAC",
+        )
+        return
+
+    payload = {
+        "student_id": student_id,
+        "device_mac": device_mac,
+        "device_code": device_name or None,
+    }
+
+    status, result = await api_request_async(
+        "POST",
+        "/api/devices/register",
+        payload,
+    )
+
+    print(
+        f"[API] Device registration -> "
+        f"HTTP {status}: {result}"
+    )
+
+    if status != 200 or not result or not result.get("success"):
+        reason = "BACKEND_REGISTRATION_FAILED"
+
+        if isinstance(result, dict):
+            detail = result.get("detail")
+            if detail:
+                reason = str(detail)
 
         await send_register_ack(
             client,
             student_id,
             "REJECTED",
-            "EMPTY_DEVICE_MAC"
+            reason,
         )
         return
 
-    # Store mapping in runtime memory.
     registered_devices[student_id] = {
         "device_mac": device_mac,
         "device_name": device_name,
@@ -247,38 +311,26 @@ async def process_registration(client, message):
     current_device_mac = device_mac
     current_device_name = device_name
 
-    print()
-    print("[OK] Registration accepted.")
     print(
-        f"[MAP] {student_id} <-> "
-        f"{device_mac}"
+        f"[OK] Registered in backend: "
+        f"{student_id} <-> {device_mac}"
     )
-
-    print()
-    print("[REGISTERED DEVICES]")
-    for sid, info in registered_devices.items():
-        print(
-            f"  {sid} -> "
-            f"{info['device_mac']} "
-            f"({info['device_name']})"
-        )
 
     await send_register_ack(
         client,
         student_id,
-        "ACCEPTED"
+        "ACCEPTED",
     )
 
 
 # =====================================================
 # REGISTRATION CALLBACK
-# ESP32 -> Raspberry Pi
 # =====================================================
 
 def registration_callback(characteristic, data):
     message = data.decode(
         "utf-8",
-        errors="replace"
+        errors="replace",
     )
 
     client = current_client
@@ -290,14 +342,14 @@ def registration_callback(characteristic, data):
     asyncio.create_task(
         process_registration(
             client,
-            message
+            message,
         )
     )
 
 
 # =====================================================
-# ANSWER PROCESS
-# ESP32 -> Raspberry Pi
+# ANSWER
+# ESP32 -> Gateway -> FastAPI -> SQLite
 # =====================================================
 
 async def process_answer(client, message):
@@ -310,14 +362,14 @@ async def process_answer(client, message):
 
     try:
         packet = json.loads(message)
-    except json.JSONDecodeError as e:
-        print(f"[ERROR] Invalid JSON: {e}")
+    except json.JSONDecodeError as exc:
+        print(f"[ERROR] Invalid JSON: {exc}")
 
         await send_answer_ack(
             client,
             "",
             "REJECTED",
-            "INVALID_JSON"
+            "INVALID_JSON",
         )
         return
 
@@ -333,13 +385,7 @@ async def process_answer(client, message):
         packet.get("answer", "")
     ).strip().upper()
 
-    print(f"Student ID : {student_id}")
-    print(f"Question   : {question_id}")
-    print(f"Answer     : {answer}")
-
-    # -------------------------------------------------
-    # BASIC VALIDATION
-    # -------------------------------------------------
+    sequence = packet.get("sequence")
 
     if (
         packet.get("type") != "ANSWER"
@@ -347,96 +393,78 @@ async def process_answer(client, message):
         or not question_id
         or answer not in ("A", "B", "C", "D")
     ):
-        print("[ERROR] Invalid answer packet.")
+        await send_answer_ack(
+            client,
+            question_id,
+            "REJECTED",
+            "INVALID_PACKET",
+        )
+        return
+
+    device_info = registered_devices.get(student_id)
+
+    if device_info is None:
+        await send_answer_ack(
+            client,
+            question_id,
+            "REJECTED",
+            "STUDENT_NOT_REGISTERED",
+        )
+        return
+
+    payload = {
+        "student_id": student_id,
+        "device_mac": device_info["device_mac"],
+        "question_id": question_id,
+        "answer": answer,
+    }
+
+    if sequence is not None:
+        payload["sequence"] = sequence
+
+    status, result = await api_request_async(
+        "POST",
+        "/api/responses/answer",
+        payload,
+    )
+
+    print(
+        f"[API] Answer submission -> "
+        f"HTTP {status}: {result}"
+    )
+
+    if status != 200 or not result:
+        reason = "BACKEND_ANSWER_REJECTED"
+
+        if isinstance(result, dict):
+            detail = result.get("detail")
+            if detail:
+                reason = str(detail)
 
         await send_answer_ack(
             client,
             question_id,
             "REJECTED",
-            "INVALID_PACKET"
+            reason,
         )
         return
-
-    # -------------------------------------------------
-    # REGISTRATION VALIDATION
-    # -------------------------------------------------
-
-    if student_id not in registered_devices:
-        print(
-            "[ERROR] Student is not registered."
-        )
-
-        await send_answer_ack(
-            client,
-            question_id,
-            "REJECTED",
-            "STUDENT_NOT_REGISTERED"
-        )
-        return
-
-    # -------------------------------------------------
-    # QUESTION VALIDATION
-    # -------------------------------------------------
-
-    if question_id not in QUESTIONS:
-        print(
-            f"[ERROR] Unknown question: "
-            f"{question_id}"
-        )
-
-        await send_answer_ack(
-            client,
-            question_id,
-            "REJECTED",
-            "UNKNOWN_QUESTION"
-        )
-        return
-
-    # -------------------------------------------------
-    # CHECK ANSWER
-    # -------------------------------------------------
-
-    correct_answer = QUESTIONS[
-        question_id
-    ]["correct_answer"]
-
-    is_correct = (
-        answer == correct_answer
-    )
-
-    print()
-    print(
-        f"Correct answer: {correct_answer}"
-    )
-    print(
-        f"Student answer: {answer}"
-    )
-    print(
-        f"Result        : "
-        f"{'CORRECT' if is_correct else 'WRONG'}"
-    )
-
-    # -------------------------------------------------
-    # ACCEPT ANSWER
-    # -------------------------------------------------
 
     await send_answer_ack(
         client,
         question_id,
         "ACCEPTED",
-        correct=bool(is_correct)
+        correct=bool(result.get("correct", False)),
     )
 
 
 # =====================================================
 # ANSWER CALLBACK
-# ESP32 -> Raspberry Pi
 # =====================================================
 
 def answer_callback(characteristic, data):
     message = data.decode(
         "utf-8",
-        errors="replace"
+        errors="replace",
     )
 
     client = current_client
@@ -448,73 +476,73 @@ def answer_callback(characteristic, data):
     asyncio.create_task(
         process_answer(
             client,
-            message
+            message,
         )
     )
 
 
 # =====================================================
-# SEND QUESTION
-# Raspberry Pi -> ESP32
+# SEND CURRENT QUESTION
+# FastAPI -> Gateway -> ESP32
 # =====================================================
 
-async def send_question(client, question_id):
-    if question_id not in QUESTIONS:
-        print(
-            f"[ERROR] Unknown question: "
-            f"{question_id}"
-        )
+async def send_current_question(client):
+    status, result = await api_request_async(
+        "GET",
+        f"/api/quizzes/{ACTIVE_QUIZ_ID}/current",
+    )
+
+    print(
+        f"[API] Current question -> "
+        f"HTTP {status}: {result}"
+    )
+
+    if status != 200 or not result:
+        print("[ERROR] Could not fetch current question.")
         return
 
-    q = QUESTIONS[question_id]
+    question_number = result["question_number"]
 
     packet = {
         "type": "QUESTION",
         "session_id": SESSION_ID,
-        "question_id": question_id,
-        "question": q["question"],
-        "A": q["A"],
-        "B": q["B"],
-        "C": q["C"],
-        "D": q["D"],
+        "question_id": f"Q{question_number:02d}",
+        "question": result["question_text"],
+        "A": result["option_a"],
+        "B": result["option_b"],
+        "C": result["option_c"],
+        "D": result["option_d"],
     }
 
     message = json.dumps(
         packet,
-        separators=(",", ":")
+        separators=(",", ":"),
     )
-
-    data = message.encode("utf-8")
-
-    print()
-    print("======================================")
-    print("[QUESTION TX]")
-    print("======================================")
-    print(message)
-    print("======================================")
 
     try:
         question_char = get_characteristic(
             client,
-            QUESTION_CHAR_UUID
+            QUESTION_CHAR_UUID,
         )
 
         await client.write_gatt_char(
             question_char,
-            data,
-            response=True
+            message.encode("utf-8"),
+            response=True,
         )
 
-        print(
-            f"[OK] {question_id} sent successfully."
-        )
+        print()
+        print("======================================")
+        print("[QUESTION TX]")
+        print("======================================")
+        print(message)
+        print("[OK] Current question sent.")
+        print("======================================")
 
-    except Exception as e:
+    except Exception as exc:
         print(
-            "[ERROR] Failed to send question."
-        )
-        print(
-            f"Reason: {type(e).__name__}: {e}"
+            f"[ERROR] Failed to send question: "
+            f"{type(exc).__name__}: {exc}"
         )
 
 
@@ -527,11 +555,11 @@ def show_menu():
     print("======================================")
     print("       PulseNet BLE Gateway")
     print("======================================")
-    print("1. Send Q01")
-    print("2. Send Q02")
-    print("3. Send CONNECTED ACK")
-    print("4. Show registered devices")
-    print("5. Show BLE connection status")
+    print("1. Send current question")
+    print("2. Send CONNECTED ACK")
+    print("3. Show registered devices")
+    print("4. Show BLE connection status")
+    print("5. Show backend status")
     print("6. Exit")
     print("======================================")
 
@@ -542,107 +570,59 @@ async def menu_loop(client):
 
         choice = await asyncio.to_thread(
             input,
-            "Select option: "
+            "Select option: ",
         )
 
         choice = choice.strip()
 
-        # -------------------------------------------------
-        # Q01
-        # -------------------------------------------------
-
         if choice == "1":
-            await send_question(
-                client,
-                "Q01"
-            )
-
-        # -------------------------------------------------
-        # Q02
-        # -------------------------------------------------
+            await send_current_question(client)
 
         elif choice == "2":
-            await send_question(
-                client,
-                "Q02"
-            )
-
-        # -------------------------------------------------
-        # CONNECTED ACK
-        # -------------------------------------------------
-
-        elif choice == "3":
             await send_ack(
                 client,
-                '{"type":"ACK","status":"CONNECTED"}'
+                '{"type":"ACK","status":"CONNECTED"}',
             )
 
-        # -------------------------------------------------
-        # REGISTERED DEVICES
-        # -------------------------------------------------
-
-        elif choice == "4":
+        elif choice == "3":
             print()
-            print("======================================")
             print("[REGISTERED DEVICES]")
-            print("======================================")
 
             if not registered_devices:
-                print("No devices registered.")
+                print("No devices registered in this gateway session.")
             else:
                 for sid, info in registered_devices.items():
                     print(
-                        f"Student ID : {sid}"
+                        f"  {sid} -> "
+                        f"{info['device_mac']} "
+                        f"({info['device_name']})"
                     )
-                    print(
-                        f"Device MAC : "
-                        f"{info['device_mac']}"
-                    )
-                    print(
-                        f"Device Name: "
-                        f"{info['device_name']}"
-                    )
-                    print("--------------------------------------")
 
-        # -------------------------------------------------
-        # CONNECTION STATUS
-        # -------------------------------------------------
+        elif choice == "4":
+            print(
+                "[STATUS] BLE connected."
+                if client.is_connected
+                else "[STATUS] BLE disconnected."
+            )
 
         elif choice == "5":
-            print()
+            status, result = await api_request_async(
+                "GET",
+                "/health",
+            )
 
-            if client.is_connected:
-                print(
-                    "[STATUS] BLE connected."
-                )
-            else:
-                print(
-                    "[STATUS] BLE disconnected."
-                )
-
-        # -------------------------------------------------
-        # EXIT
-        # -------------------------------------------------
+            print(
+                f"[STATUS] Backend HTTP {status}: {result}"
+            )
 
         elif choice == "6":
-            print(
-                "\n[INFO] Exiting gateway..."
-            )
+            print("[INFO] Exiting gateway...")
             break
 
         else:
-            print(
-                "\n[ERROR] Invalid option."
-            )
+            print("[ERROR] Invalid option.")
 
         await asyncio.sleep(0.2)
-
-
-# =====================================================
-# GLOBAL CLIENT
-# =====================================================
-
-current_client = None
 
 
 # =====================================================
@@ -655,42 +635,43 @@ async def main():
     print("======================================")
     print("       PulseNet BLE Gateway")
     print("======================================")
-    print(
-        f"Target device: {DEVICE_ADDRESS}"
-    )
+    print(f"Target device : {DEVICE_ADDRESS}")
+    print(f"Backend API   : {API_BASE_URL}")
+    print(f"Active quiz   : {ACTIVE_QUIZ_ID}")
+    print(f"Session ID    : {SESSION_ID}")
     print()
 
     try:
+        status, result = await api_request_async(
+            "GET",
+            "/health",
+        )
+
+        if status == 200:
+            print("[OK] Backend API is reachable.")
+        else:
+            print(
+                f"[WARNING] Backend health check failed: "
+                f"HTTP {status}"
+            )
+
         async with BleakClient(
             DEVICE_ADDRESS
         ) as client:
-
             current_client = client
 
             print("[OK] BLE connected")
 
-            # -------------------------------------------------
-            # GATT SERVICES
-            # -------------------------------------------------
-
             print("\n[INFO] GATT services:")
 
             for service in client.services:
-                print(
-                    f"\nService: {service.uuid}"
-                )
+                print(f"\nService: {service.uuid}")
 
                 for char in service.characteristics:
                     print(
-                        f"  Characteristic: "
-                        f"{char.uuid} "
-                        f"properties="
-                        f"{char.properties}"
+                        f"  Characteristic: {char.uuid} "
+                        f"properties={char.properties}"
                     )
-
-            # -------------------------------------------------
-            # SUBSCRIBE REGISTRATION
-            # -------------------------------------------------
 
             print(
                 "\n[INFO] Subscribing to "
@@ -699,12 +680,8 @@ async def main():
 
             await client.start_notify(
                 REGISTRATION_CHAR_UUID,
-                registration_callback
+                registration_callback,
             )
-
-            # -------------------------------------------------
-            # SUBSCRIBE ANSWER
-            # -------------------------------------------------
 
             print(
                 "[INFO] Subscribing to "
@@ -713,20 +690,12 @@ async def main():
 
             await client.start_notify(
                 ANSWER_CHAR_UUID,
-                answer_callback
+                answer_callback,
             )
-
-            print(
-                "[OK] Notification handlers enabled"
-            )
-
-            # -------------------------------------------------
-            # INITIAL CONNECTED ACK
-            # -------------------------------------------------
 
             await send_ack(
                 client,
-                '{"type":"ACK","status":"CONNECTED"}'
+                '{"type":"ACK","status":"CONNECTED"}',
             )
 
             print()
@@ -737,15 +706,10 @@ async def main():
 
             await menu_loop(client)
 
-            # -------------------------------------------------
-            # CLEANUP
-            # -------------------------------------------------
-
             try:
                 await client.stop_notify(
                     REGISTRATION_CHAR_UUID
                 )
-
                 await client.stop_notify(
                     ANSWER_CHAR_UUID
                 )
@@ -754,36 +718,20 @@ async def main():
 
             current_client = None
 
-            print(
-                "\n[INFO] BLE notifications stopped."
-            )
-
-    except Exception as e:
+    except Exception as exc:
         current_client = None
 
         print()
         print("======================================")
         print("[ERROR] BLE Gateway failed")
         print("======================================")
-        print(
-            f"Type   : {type(e).__name__}"
-        )
-        print(
-            f"Reason : {e}"
-        )
+        print(f"Type   : {type(exc).__name__}")
+        print(f"Reason : {exc}")
         print("======================================")
 
-
-# =====================================================
-# PROGRAM ENTRY
-# =====================================================
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-
     except KeyboardInterrupt:
-        print("\n")
-        print("======================================")
-        print("[INFO] Gateway stopped by user.")
-        print("======================================")
+        print("\n[INFO] Gateway stopped by user.")
