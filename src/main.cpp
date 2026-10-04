@@ -53,6 +53,7 @@ const char keyMap[4][4] = {
 // =====================================================
 
 String studentID = "";
+String currentQuestionId = "";
 const size_t MAX_ID_LENGTH = 10;
 
 // =====================================================
@@ -136,6 +137,12 @@ class ACKCallbacks : public BLECharacteristicCallbacks
         Serial.println(value);
         Serial.println("============================");
 
+        if (value.indexOf("\"type\":\"REGISTER_ACK\"") < 0 ||
+            value.indexOf("\"status\":\"ACCEPTED\"") < 0)
+        {
+            return;
+        }
+
         tft.fillScreen(ST77XX_BLACK);
 
         tft.setTextColor(ST77XX_GREEN);
@@ -175,6 +182,22 @@ class QuestionCallbacks : public BLECharacteristicCallbacks
         Serial.println("========== QUESTION ==========");
         Serial.println(question);
         Serial.println("==============================");
+
+        int idStart = question.indexOf("\"question_id\":\"");
+        if (idStart >= 0)
+        {
+            idStart += 15;
+            int idEnd = question.indexOf("\"", idStart);
+
+            if (idEnd > idStart)
+            {
+                currentQuestionId =
+                    question.substring(idStart, idEnd);
+
+                Serial.print("Current Question ID: ");
+                Serial.println(currentQuestionId);
+            }
+        }
 
         tft.fillScreen(ST77XX_BLACK);
 
@@ -375,9 +398,16 @@ bool sendAnswer(char answer)
         return false;
     }
 
+    if (currentQuestionId.length() == 0)
+    {
+        Serial.println("ERROR: No current question is available.");
+        return false;
+    }
+
     String packet =
         "{\"type\":\"ANSWER\","
         "\"student_id\":\"" + studentID + "\","
+        "\"question_id\":\"" + currentQuestionId + "\","
         "\"answer\":\"" + String(answer) + "\"}";
 
     Serial.println();
