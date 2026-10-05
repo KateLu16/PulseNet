@@ -42,7 +42,7 @@ def get_quiz_students(
             Response.student_id.label("student_id"),
             func.count(Response.id).label("answered_count"),
             func.sum(
-                func.cast(Response.is_correct, Integer)
+                cast(Response.is_correct, Integer)
             ).label("correct_count"),
         )
         .where(Response.quiz_id == quiz_id)
