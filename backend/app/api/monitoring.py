@@ -1,9 +1,11 @@
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.device import Device
+from app.models.question import Question
 from app.models.quiz import Quiz
 from app.models.quiz_registration import QuizRegistration
 from app.models.response import Response
@@ -49,13 +51,10 @@ def get_quiz_students(
     )
 
     total_questions = db.scalar(
-        select(func.count()).select_from(
-            __import__("app.models.question", fromlist=["Question"]).Question
-        ).where(
-            __import__("app.models.question", fromlist=["Question"]).Question.quiz_id
-            == quiz_id
-        )
-    ) or 0
+    select(func.count())
+    .select_from(Question)
+    .where(Question.quiz_id == quiz_id)
+) or 0
 
     stmt = (
         select(
