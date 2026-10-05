@@ -8,6 +8,8 @@ from app.api.questions import router as questions_router
 from app.api.responses import router as responses_router
 
 from app.api.analytics import router as analytics_router
+from app.api.monitoring import router as monitoring_router
+
 
 app = FastAPI(
     title="PulseNet Backend",
@@ -20,6 +22,7 @@ app.include_router(quizzes_router)
 app.include_router(questions_router)
 app.include_router(responses_router)
 app.include_router(analytics_router)
+app.include_router(monitoring_router)
 
 
 @app.get("/")
