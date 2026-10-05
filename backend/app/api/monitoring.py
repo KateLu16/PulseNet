@@ -1,6 +1,6 @@
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import Integer, cast, func, select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -42,7 +42,7 @@ def get_quiz_students(
             Response.student_id.label("student_id"),
             func.count(Response.id).label("answered_count"),
             func.sum(
-                func.cast(Response.is_correct, int)
+                func.cast(Response.is_correct, Integer)
             ).label("correct_count"),
         )
         .where(Response.quiz_id == quiz_id)
