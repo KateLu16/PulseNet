@@ -15,7 +15,7 @@
 #define DEVICE_NAME "PULSENET-001"
 
 // =====================================================
-// TFT
+// TFT - 160x128 LANDSCAPE
 // =====================================================
 
 #define TFT_CS    5
@@ -23,6 +23,10 @@
 #define TFT_RST   4
 
 Adafruit_ST7735 tft(TFT_CS, TFT_DC, TFT_RST);
+
+// Logical display size after rotation:
+// WIDTH  = 160
+// HEIGHT = 128
 
 // =====================================================
 // KEYPAD 4x4
@@ -158,26 +162,30 @@ class ACKCallbacks : public BLECharacteristicCallbacks
         Serial.println(value);
         Serial.println("============================");
 
+        // -------------------------------------------------
+        // 160x128 LANDSCAPE UI
+        // -------------------------------------------------
+
         tft.fillScreen(ST77XX_BLACK);
 
         tft.setTextColor(ST77XX_GREEN);
         tft.setTextSize(2);
-        tft.setCursor(20, 10);
+        tft.setCursor(25, 10);
         tft.println("REGISTERED");
 
         tft.setTextColor(ST77XX_WHITE);
         tft.setTextSize(1);
-        tft.setCursor(5, 45);
+        tft.setCursor(10, 45);
         tft.println("Student ID:");
 
         tft.setTextColor(ST77XX_YELLOW);
         tft.setTextSize(2);
-        tft.setCursor(5, 60);
+        tft.setCursor(10, 60);
         tft.println(studentID);
 
         tft.setTextColor(ST77XX_CYAN);
         tft.setTextSize(1);
-        tft.setCursor(35, 100);
+        tft.setCursor(68, 105);
         tft.println("READY");
     }
 };
@@ -191,28 +199,28 @@ class QuestionCallbacks : public BLECharacteristicCallbacks
 {
     void onWrite(BLECharacteristic* characteristic) override
     {
-        String question = characteristic->getValue().c_str();
+        String packet = characteristic->getValue().c_str();
 
         Serial.println();
         Serial.println("========== QUESTION ==========");
-        Serial.println(question);
+        Serial.println(packet);
         Serial.println("==============================");
 
         // -------------------------------------------------
-        // Extract question_id from JSON
+        // Extract question_id
         // -------------------------------------------------
 
-        int idStart = question.indexOf("\"question_id\":\"");
+        int idStart = packet.indexOf("\"question_id\":\"");
 
         if (idStart >= 0)
         {
             idStart += strlen("\"question_id\":\"");
 
-            int idEnd = question.indexOf("\"", idStart);
+            int idEnd = packet.indexOf("\"", idStart);
 
             if (idEnd > idStart)
             {
-                currentQuestionID = question.substring(
+                currentQuestionID = packet.substring(
                     idStart,
                     idEnd
                 );
@@ -223,20 +231,209 @@ class QuestionCallbacks : public BLECharacteristicCallbacks
         }
 
         // -------------------------------------------------
-        // Display question
+        // Extract question text
+        // -------------------------------------------------
+
+        String questionText = "";
+
+        int questionStart =
+            packet.indexOf("\"question\":\"");
+
+        if (questionStart >= 0)
+        {
+            questionStart += strlen("\"question\":\"");
+
+            int questionEnd =
+                packet.indexOf("\"", questionStart);
+
+            if (questionEnd > questionStart)
+            {
+                questionText =
+                    packet.substring(
+                        questionStart,
+                        questionEnd
+                    );
+            }
+        }
+
+        // -------------------------------------------------
+        // Extract options
+        // -------------------------------------------------
+
+        String optionA = "";
+        String optionB = "";
+        String optionC = "";
+        String optionD = "";
+
+        int posA = packet.indexOf("\"A\":\"");
+
+        if (posA >= 0)
+        {
+            posA += strlen("\"A\":\"");
+
+            int endA = packet.indexOf("\"", posA);
+
+            if (endA > posA)
+                optionA = packet.substring(posA, endA);
+        }
+
+        int posB = packet.indexOf("\"B\":\"");
+
+        if (posB >= 0)
+        {
+            posB += strlen("\"B\":\"");
+
+            int endB = packet.indexOf("\"", posB);
+
+            if (endB > posB)
+                optionB = packet.substring(posB, endB);
+        }
+
+        int posC = packet.indexOf("\"C\":\"");
+
+        if (posC >= 0)
+        {
+            posC += strlen("\"C\":\"");
+
+            int endC = packet.indexOf("\"", posC);
+
+            if (endC > posC)
+                optionC = packet.substring(posC, endC);
+        }
+
+        int posD = packet.indexOf("\"D\":\"");
+
+        if (posD >= 0)
+        {
+            posD += strlen("\"D\":\"");
+
+            int endD = packet.indexOf("\"", posD);
+
+            if (endD > posD)
+                optionD = packet.substring(posD, endD);
+        }
+
+        // -------------------------------------------------
+        // Serial debug
+        // -------------------------------------------------
+
+        Serial.println("------ PARSED QUESTION ------");
+
+        Serial.print("Question ID: ");
+        Serial.println(currentQuestionID);
+
+        Serial.print("Question: ");
+        Serial.println(questionText);
+
+        Serial.print("A: ");
+        Serial.println(optionA);
+
+        Serial.print("B: ");
+        Serial.println(optionB);
+
+        Serial.print("C: ");
+        Serial.println(optionC);
+
+        Serial.print("D: ");
+        Serial.println(optionD);
+
+        Serial.println("-----------------------------");
+
+        // -------------------------------------------------
+        // DISPLAY
+        // 160 x 128 LANDSCAPE
         // -------------------------------------------------
 
         tft.fillScreen(ST77XX_BLACK);
 
+        // -------------------------------------------------
+        // Header
+        // -------------------------------------------------
+
         tft.setTextColor(ST77XX_CYAN);
         tft.setTextSize(1);
+
         tft.setCursor(5, 5);
-        tft.println("QUESTION");
+        tft.print("QUESTION ");
+
+        tft.setTextColor(ST77XX_YELLOW);
+        tft.print(currentQuestionID);
+
+        // -------------------------------------------------
+        // Question text
+        // -------------------------------------------------
 
         tft.setTextColor(ST77XX_WHITE);
         tft.setTextSize(1);
-        tft.setCursor(5, 25);
-        tft.println(question);
+
+        int x = 5;
+        int y = 20;
+
+        const int maxCharsPerLine = 26;
+
+        String remaining = questionText;
+
+        while (remaining.length() > 0 && y < 65)
+        {
+            int lineLength = maxCharsPerLine;
+
+            if (remaining.length() < lineLength)
+            {
+                lineLength = remaining.length();
+            }
+
+            // -------------------------------------------------
+            // Don't split a word if possible.
+            // -------------------------------------------------
+
+            if (lineLength < remaining.length())
+            {
+                int spacePos =
+                    remaining.lastIndexOf(' ', lineLength);
+
+                if (spacePos > 0)
+                {
+                    lineLength = spacePos;
+                }
+            }
+
+            String line =
+                remaining.substring(0, lineLength);
+
+            line.trim();
+
+            tft.setCursor(x, y);
+            tft.println(line);
+
+            remaining =
+                remaining.substring(lineLength);
+
+            remaining.trim();
+
+            y += 10;
+        }
+
+        // -------------------------------------------------
+        // Options
+        // -------------------------------------------------
+
+        tft.setTextColor(ST77XX_GREEN);
+
+        tft.setCursor(5, 70);
+        tft.print("A. ");
+        tft.println(optionA);
+
+        tft.setCursor(5, 84);
+        tft.print("B. ");
+        tft.println(optionB);
+
+        tft.setCursor(5, 98);
+        tft.print("C. ");
+        tft.println(optionC);
+
+        tft.setCursor(5, 112);
+        tft.print("D. ");
+        tft.println(optionD);
     }
 };
 
@@ -293,22 +490,24 @@ char readKeypad()
 
 void displayStudentID()
 {
+    // 160x128 landscape
+    // Clear full-width student ID area.
     tft.fillRect(
         0,
         42,
-        128,
+        160,
         38,
         ST77XX_BLACK
     );
 
     tft.setTextColor(ST77XX_WHITE);
     tft.setTextSize(1);
-    tft.setCursor(5, 45);
+    tft.setCursor(10, 45);
     tft.println("Student ID:");
 
     tft.setTextColor(ST77XX_YELLOW);
     tft.setTextSize(2);
-    tft.setCursor(5, 58);
+    tft.setCursor(10, 58);
     tft.println(studentID);
 
     Serial.print("Student ID: ");
@@ -323,25 +522,37 @@ void displayReady()
 {
     tft.fillScreen(ST77XX_BLACK);
 
+    // -------------------------------------------------
+    // Header
+    // -------------------------------------------------
+
     tft.setTextColor(ST77XX_GREEN);
     tft.setTextSize(2);
-    tft.setCursor(15, 10);
+    tft.setCursor(45, 8);
     tft.println("PulseNet");
+
+    // -------------------------------------------------
+    // Student ID
+    // -------------------------------------------------
 
     tft.setTextColor(ST77XX_WHITE);
     tft.setTextSize(1);
-    tft.setCursor(5, 35);
+    tft.setCursor(10, 35);
     tft.println("Enter Student ID:");
 
     displayStudentID();
 
+    // -------------------------------------------------
+    // Key instructions
+    // -------------------------------------------------
+
     tft.setTextColor(ST77XX_CYAN);
     tft.setTextSize(1);
 
-    tft.setCursor(5, 95);
+    tft.setCursor(10, 95);
     tft.println("* = Clear");
 
-    tft.setCursor(5, 110);
+    tft.setCursor(10, 110);
     tft.println("# = Confirm");
 }
 
@@ -355,24 +566,36 @@ void displayRegistrationStatus(
 {
     tft.fillScreen(ST77XX_BLACK);
 
+    // -------------------------------------------------
+    // Header
+    // -------------------------------------------------
+
     tft.setTextColor(ST77XX_CYAN);
     tft.setTextSize(2);
-    tft.setCursor(8, 15);
+    tft.setCursor(35, 12);
     tft.println("REGISTER");
+
+    // -------------------------------------------------
+    // Student ID
+    // -------------------------------------------------
 
     tft.setTextColor(ST77XX_WHITE);
     tft.setTextSize(1);
-    tft.setCursor(5, 50);
+    tft.setCursor(10, 45);
     tft.println("Student ID:");
 
     tft.setTextColor(ST77XX_YELLOW);
     tft.setTextSize(2);
-    tft.setCursor(5, 65);
+    tft.setCursor(10, 60);
     tft.println(studentID);
+
+    // -------------------------------------------------
+    // Status
+    // -------------------------------------------------
 
     tft.setTextColor(ST77XX_GREEN);
     tft.setTextSize(1);
-    tft.setCursor(5, 100);
+    tft.setCursor(10, 100);
     tft.println(status);
 }
 
@@ -693,7 +916,7 @@ void setup()
     );
 
     Serial.println(
-        "ESP32 + ST7735S + Keypad + BLE"
+        "ESP32 + ST7735S 160x128 + Keypad + BLE"
     );
 
     Serial.println(
@@ -705,21 +928,36 @@ void setup()
     // -------------------------------------------------
 
     Serial.println(
-        "Starting ST7735S 128x128..."
+        "Starting ST7735S 160x128 landscape..."
     );
+
+    /*
+     * The physical ST7735 display is 128x160.
+     *
+     * Rotation 1 changes the logical orientation to:
+     *
+     * WIDTH  = 160
+     * HEIGHT = 128
+     */
 
     tft.initR(
-        INITR_144GREENTAB
+        INITR_BLACKTAB
     );
 
-    tft.setRotation(0);
+    tft.setRotation(1);
 
     tft.fillScreen(
         ST77XX_BLACK
     );
 
+    Serial.print("TFT width  : ");
+    Serial.println(tft.width());
+
+    Serial.print("TFT height : ");
+    Serial.println(tft.height());
+
     Serial.println(
-        "TFT initialized"
+        "TFT initialized in landscape mode"
     );
 
     // -------------------------------------------------
@@ -888,6 +1126,10 @@ void loop()
 
             Serial.println(key);
 
+            // -------------------------------------------------
+            // 160x128 LANDSCAPE ANSWER SCREEN
+            // -------------------------------------------------
+
             tft.fillScreen(
                 ST77XX_BLACK
             );
@@ -899,7 +1141,7 @@ void loop()
             tft.setTextSize(1);
 
             tft.setCursor(
-                10,
+                45,
                 15
             );
 
@@ -914,14 +1156,17 @@ void loop()
             tft.setTextSize(4);
 
             tft.setCursor(
-                50,
+                68,
                 45
             );
 
             tft.println(key);
 
-            // Send answer together with
-            // currentQuestionID.
+            // -------------------------------------------------
+            // Send answer together with currentQuestionID.
+            // BLE logic unchanged.
+            // -------------------------------------------------
+
             sendAnswer(key);
 
             delay(1000);
