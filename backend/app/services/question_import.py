@@ -1,5 +1,5 @@
 import csv
-from io import TextIOWrapper
+import io
 
 from sqlalchemy.orm import Session
 
@@ -74,12 +74,32 @@ def import_questions_from_csv(
     quiz_id: int,
     db: Session,
 ):
-    text_file = TextIOWrapper(
-        file.file,
-        encoding="utf-8-sig",
-    )
+    # Read raw bytes and decode here instead of wrapping
+    # file.file in TextIOWrapper — newer python-multipart
+    # exposes a SpooledTemporaryFile that TextIOWrapper
+    # cannot wrap. utf-8-sig strips the Excel BOM.
 
-    reader = csv.DictReader(text_file)
+    raw_bytes = file.file.read()
+
+    try:
+        text = raw_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return {
+            "success": False,
+            "message": "Invalid CSV encoding",
+            "errors": [
+                {
+                    "row": 1,
+                    "field": "file",
+                    "message": (
+                        "File must be UTF-8 encoded "
+                        "(save CSV as 'CSV UTF-8')"
+                    ),
+                }
+            ],
+        }
+
+    reader = csv.DictReader(io.StringIO(text))
 
     # ========================================================
     # VALIDATE HEADER

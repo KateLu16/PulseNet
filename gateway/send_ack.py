@@ -430,8 +430,46 @@ def get_running_quiz():
 
     if not running_quizzes:
 
+        # ------------------------------------------------
+        # No running quiz.
+        #
+        # Fall back to the NEWEST draft quiz so students
+        # can register BEFORE the teacher starts the quiz
+        # (the backend accepts registration for both
+        # draft and running quizzes).
+        # ------------------------------------------------
+
+        draft_quizzes = [
+            quiz
+            for quiz in result
+            if quiz.get("status") == "draft"
+        ]
+
+        if draft_quizzes:
+
+            draft_quizzes.sort(
+                key=lambda quiz: quiz.get("id") or 0,
+                reverse=True,
+            )
+
+            if len(draft_quizzes) > 1:
+
+                print(
+                    "[WARN] Multiple draft quizzes. "
+                    "Using the newest one."
+                )
+
+            print(
+                "[INFO] No running quiz. "
+                "Using newest draft quiz "
+                f"{draft_quizzes[0].get('id')} "
+                "for registration."
+            )
+
+            return draft_quizzes[0]
+
         print(
-            "[INFO] No running quiz."
+            "[INFO] No running or draft quiz."
         )
 
         return None

@@ -4,6 +4,7 @@ from app.models.device import Device
 from app.models.quiz import Quiz
 from app.models.question import Question
 from app.models.response import Response
+from app.models.quiz_registration import QuizRegistration
 
 print("Creating database...")
 

@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PulseNet — Giáo viên</title>
+    <link rel="stylesheet" href="/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+    <div class="brand">
+        <span class="brand-icon">⚡</span>
+        <div>
+            <div class="brand-name">PulseNet</div>
+            <div class="brand-sub">Hệ thống trắc nghiệm không dây — Trang giáo viên</div>
+        </div>
+    </div>
+    <div class="conn" id="connStatus">
+        <span class="dot dot-gray"></span>
+        <span id="connText">Đang kết nối...</span>
+    </div>
+</header>
+
+<!-- ==================== QUIZ BAR ==================== -->
+
+<section class="quizbar card">
+    <div class="quizbar-row">
+        <label class="field-label" for="quizSelect">Buổi quiz</label>
+        <select id="quizSelect" class="input select"></select>
+        <button id="refreshQuizzesBtn" class="btn btn-ghost" title="Tải lại danh sách quiz">⟳ Làm mới</button>
+        <span class="quizbar-sep"></span>
+        <input id="newQuizTitle" class="input" type="text" placeholder="Tên quiz mới, ví dụ: Kiểm tra IoT buổi 3">
+        <button id="createQuizBtn" class="btn btn-primary">+ Tạo quiz</button>
+    </div>
+</section>
+
+<!-- ==================== EMPTY STATE ==================== -->
+
+<main id="emptyState" class="empty card hidden">
+    <div class="empty-icon">📋</div>
+    <p>Chưa chọn buổi quiz nào.</p>
+    <p class="muted">Tạo quiz mới ở trên, hoặc chọn một quiz từ danh sách để bắt đầu.</p>
+</main>
+
+<!-- ==================== QUIZ PANEL ==================== -->
+
+<main id="quizPanel" class="hidden">
+
+    <div class="quiz-head">
+        <h2 id="quizTitle">—</h2>
+        <span id="quizBadge" class="badge">—</span>
+    </div>
+
+    <nav class="tabs" id="tabNav">
+        <button class="tab active" data-tab="questions">📝 Câu hỏi</button>
+        <button class="tab" data-tab="control">▶️ Điều khiển &amp; Giám sát</button>
+        <button class="tab" data-tab="results">🏅 Kết quả</button>
+        <button class="tab" data-tab="stats">📊 Thống kê câu hỏi</button>
+    </nav>
+
+    <!-- ============ TAB: QUESTIONS ============ -->
+
+    <section id="tab-questions" class="tabpane">
+
+        <div class="card">
+            <h3>Nhập câu hỏi từ file CSV</h3>
+            <p class="muted">
+                File CSV theo mẫu với cột: <code>Question, A, B, C, D, Correct Answer</code>.
+                Hệ thống sẽ kiểm tra lỗi, câu trùng và chỉ lưu khi toàn bộ file hợp lệ.
+            </p>
+
+            <div class="import-row">
+                <label class="btn btn-ghost file-btn">
+                    📁 Chọn file CSV
+                    <input type="file" id="csvFile" accept=".csv" hidden>
+                </label>
+                <span id="csvFileName" class="muted">Chưa chọn file</span>
+                <button id="importBtn" class="btn btn-primary" disabled>⬆ Nhập câu hỏi</button>
+                <button id="templateBtn" class="btn btn-ghost" title="Tải file mẫu">⬇ Tải mẫu CSV</button>
+            </div>
+
+            <div id="importResult" class="hidden"></div>
+        </div>
+
+        <div class="card">
+            <div class="card-head">
+                <h3>Danh sách câu hỏi</h3>
+                <span id="questionCount" class="chip">0 câu</span>
+            </div>
+            <div class="table-wrap">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th class="ta-c">STT</th>
+                            <th>Câu hỏi</th>
+                            <th>A</th>
+                            <th>B</th>
+                            <th>C</th>
+                            <th>D</th>
+                            <th class="ta-c">Đáp án</th>
+                        </tr>
+                    </thead>
+                    <tbody id="questionsBody">
+                        <tr><td colspan="7" class="muted ta-c pad">Chưa có câu hỏi nào.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+    </section>
+
+    <!-- ============ TAB: CONTROL ============ -->
+
+    <section id="tab-control" class="tabpane hidden">
+
+        <div class="card control-card">
+            <div class="control-actions">
+                <button id="startBtn" class="btn btn-primary btn-big">▶ Bắt đầu quiz</button>
+                <button id="nextBtn" class="btn btn-accent btn-big">⏭ Câu tiếp theo</button>
+                <button id="finishBtn" class="btn btn-danger btn-big">⏹ Kết thúc quiz</button>
+            </div>
+            <p id="controlHint" class="muted control-hint"></p>
+        </div>
+
+        <div class="grid-2">
+
+            <div class="card">
+                <div class="card-head">
+                    <h3>Câu hỏi hiện tại</h3>
+                    <span id="currentQNum" class="chip">—</span>
+                </div>
+                <div id="currentQuestion" class="current-question">
+                    <p class="muted">Chưa có câu hỏi nào đang hiển thị.</p>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-head">
+                    <h3>Tiến độ trả lời</h3>
+                    <span id="progressCount" class="chip">0 / 0</span>
+                </div>
+                <div class="progress">
+                    <div id="progressBar" class="progress-bar" style="width:0%"></div>
+                </div>
+                <div id="answeredList" class="answered-list muted">
+                    Chưa có sinh viên nào trả lời.
+                </div>
+            </div>
+
+        </div>
+
+        <div class="card">
+            <div class="card-head">
+                <h3>Sinh viên &amp; thiết bị</h3>
+                <span id="studentCount" class="chip">0 đã đăng ký</span>
+            </div>
+            <div class="table-wrap">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>MSSV</th>
+                            <th>Thiết bị (MAC)</th>
+                            <th class="ta-c">Trạng thái máy</th>
+                            <th class="ta-c">Đã trả lời</th>
+                        </tr>
+                    </thead>
+                    <tbody id="studentsBody">
+                        <tr><td colspan="4" class="muted ta-c pad">Chưa có sinh viên nào đăng ký.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <p class="muted small">Sinh viên nhập MSSV trên thiết bị để đăng ký vào quiz này. Danh sách tự cập nhật mỗi 2 giây.</p>
+        </div>
+
+    </section>
+
+    <!-- ============ TAB: RESULTS ============ -->
+
+    <section id="tab-results" class="tabpane hidden">
+
+        <div class="stat-grid" id="overallCards"></div>
+
+        <div class="card">
+            <div class="card-head">
+                <h3>Kết quả từng sinh viên</h3>
+                <span id="resultCount" class="chip">0 sinh viên</span>
+            </div>
+            <div class="table-wrap">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>MSSV</th>
+                            <th class="ta-c">Đã trả lời</th>
+                            <th class="ta-c">Đúng</th>
+                            <th class="ta-c">Sai</th>
+                            <th class="ta-c">Điểm</th>
+                            <th class="ta-c">Độ chính xác</th>
+                        </tr>
+                    </thead>
+                    <tbody id="resultsBody">
+                        <tr><td colspan="7" class="muted ta-c pad">Chưa có dữ liệu.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+    </section>
+
+    <!-- ============ TAB: STATS ============ -->
+
+    <section id="tab-stats" class="tabpane hidden">
+
+        <div class="stat-grid" id="statsCards"></div>
+        <div id="questionStats" class="qstats">
+            <div class="card"><p class="muted pad">Chưa có dữ liệu thống kê.</p></div>
+        </div>
+
+    </section>
+
+</main>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -226,6 +226,11 @@ def get_all_devices(
 ):
     """
     Get all known devices in the system.
+
+    Student association is per-quiz (QuizRegistration),
+    so this endpoint lists devices only. Use
+    /quizzes/{quiz_id}/students or /quizzes/{quiz_id}/devices
+    to see which student used a device in a quiz.
     """
 
     stmt = (
@@ -236,12 +241,6 @@ def get_all_devices(
             Device.battery,
             Device.last_seen,
             Device.created_at,
-            Student.student_id,
-            Student.name,
-        )
-        .outerjoin(
-            Student,
-            Student.id == Device.student_id,
         )
         .order_by(Device.device_mac)
     )
@@ -259,12 +258,111 @@ def get_all_devices(
                 "battery": row.battery,
                 "last_seen": row.last_seen,
                 "created_at": row.created_at,
-                "student_id": row.student_id,
-                "student_name": row.name,
             }
         )
 
     return {
         "total_devices": len(devices),
         "devices": devices,
+    }
+
+
+# ============================================================
+# LIVE PROGRESS OF CURRENT QUESTION
+# ============================================================
+
+@router.get("/quizzes/{quiz_id}/responses/current")
+def get_current_question_progress(
+    quiz_id: int,
+    db: Session = Depends(get_db),
+):
+    """
+    Live answering progress for the current question of a quiz.
+
+    Used by the teacher dashboard while the quiz is running:
+    - how many students are registered
+    - how many already answered the current question
+    - who answered (student id + time)
+    """
+    quiz = db.get(Quiz, quiz_id)
+
+    if quiz is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Quiz not found",
+        )
+
+    total_registered = (
+        db.query(func.count(QuizRegistration.id))
+        .filter(
+            QuizRegistration.quiz_id == quiz_id,
+        )
+        .scalar()
+        or 0
+    )
+
+    def empty_result():
+        return {
+            "quiz_id": quiz_id,
+            "quiz_status": quiz.status,
+            "question": None,
+            "total_registered": total_registered,
+            "answered_count": 0,
+            "answered_students": [],
+        }
+
+    if quiz.status != "running":
+        return empty_result()
+
+    if quiz.current_question_number is None:
+        return empty_result()
+
+    question = (
+        db.query(Question)
+        .filter(
+            Question.quiz_id == quiz_id,
+            Question.question_number
+            == quiz.current_question_number,
+        )
+        .first()
+    )
+
+    if question is None:
+        return empty_result()
+
+    rows = (
+        db.query(Response, Student.name)
+        .outerjoin(
+            Student,
+            Student.student_id == Response.student_id,
+        )
+        .filter(
+            Response.quiz_id == quiz_id,
+            Response.question_id == question.id,
+        )
+        .order_by(Response.answered_at.asc())
+        .all()
+    )
+
+    answered_students = [
+        {
+            "student_id": response.student_id,
+            "name": name,
+            "answer": response.answer,
+            "answered_at": response.answered_at,
+        }
+        for response, name in rows
+    ]
+
+    return {
+        "quiz_id": quiz_id,
+        "quiz_status": quiz.status,
+        "question": {
+            "question_id": question.id,
+            "question_number": question.question_number,
+            "question_text": question.question_text,
+        },
+        "total_registered": total_registered,
+        "answered_count": len(answered_students),
+        "answered_students": answered_students,
     }

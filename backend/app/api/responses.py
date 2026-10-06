@@ -225,21 +225,50 @@ def submit_answer(
     )
 
     # ========================================================
-    # 10. SAVE RESPONSE
+    # 10. SAVE RESPONSE (UPSERT - LAST ANSWER WINS)
+    #
+    # A student may press a key twice or change their mind.
+    # Instead of inserting a duplicate row (which would
+    # double-count in analytics), update the existing
+    # response for this (quiz, question, student).
     # ========================================================
 
-    response = Response(
-        quiz_id=data.quiz_id,
-        question_id=question.id,
-        student_id=data.student_id,
-        device_mac=data.device_mac,
-        answer=answer,
-        is_correct=is_correct,
-        sequence=data.sequence,
-        answered_at=datetime.utcnow(),
+    existing_response = (
+        db.query(Response)
+        .filter(
+            Response.quiz_id == data.quiz_id,
+            Response.question_id == question.id,
+            Response.student_id == data.student_id,
+        )
+        .first()
     )
 
-    db.add(response)
+    if existing_response is not None:
+
+        existing_response.answer = answer
+        existing_response.is_correct = is_correct
+        existing_response.device_mac = data.device_mac
+        existing_response.sequence = data.sequence
+        existing_response.answered_at = datetime.utcnow()
+
+        response = existing_response
+        status = "UPDATED"
+
+    else:
+
+        response = Response(
+            quiz_id=data.quiz_id,
+            question_id=question.id,
+            student_id=data.student_id,
+            device_mac=data.device_mac,
+            answer=answer,
+            is_correct=is_correct,
+            sequence=data.sequence,
+            answered_at=datetime.utcnow(),
+        )
+
+        db.add(response)
+        status = "ACCEPTED"
 
     # ========================================================
     # 11. UPDATE DEVICE ACTIVITY
@@ -262,7 +291,7 @@ def submit_answer(
 
     return AnswerResponse(
         success=True,
-        status="ACCEPTED",
+        status=status,
         quiz_id=response.quiz_id,
         question_id=response.question_id,
         student_id=response.student_id,

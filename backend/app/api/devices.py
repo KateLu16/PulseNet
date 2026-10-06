@@ -46,10 +46,17 @@ def register_device(
             detail="Quiz not found",
         )
 
-    if quiz.status != "draft":
+    # Students register while the quiz is still draft
+    # (before the teacher starts it) but may also join
+    # late while it is running.
+
+    if quiz.status not in ("draft", "running"):
         raise HTTPException(
             status_code=400,
-            detail="Quiz is not in draft status",
+            detail=(
+                "Quiz is not open for registration "
+                f"(status: {quiz.status})"
+            ),
         )
 
     # --------------------------------------------------------

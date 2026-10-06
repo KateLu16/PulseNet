@@ -1,4 +1,8 @@
+from pathlib import Path
+
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.models.quiz_registration import QuizRegistration
 
@@ -17,6 +21,16 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# The teacher tablet loads the dashboard from the Pi over
+# Wi-Fi (different origin than the API in some setups).
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(devices_router)
 app.include_router(quizzes_router)
 app.include_router(questions_router)
@@ -25,15 +39,28 @@ app.include_router(analytics_router)
 app.include_router(monitoring_router)
 
 
-@app.get("/")
-def root():
-    return {
-        "message": "PulseNet Backend is running",
-    }
-
-
 @app.get("/health")
 def health():
     return {
         "status": "ok",
     }
+
+
+# ------------------------------------------------------------
+# Teacher web dashboard (static HTML/CSS/JS).
+#
+# Served at http://<pi-ip>:8000/ so the tablet only needs
+# one URL. API routes above take precedence over the mount.
+# ------------------------------------------------------------
+
+WEB_DIR = (
+    Path(__file__).resolve().parent.parent
+    / "web"
+)
+
+if WEB_DIR.is_dir():
+    app.mount(
+        "/",
+        StaticFiles(directory=str(WEB_DIR), html=True),
+        name="web",
+    )
