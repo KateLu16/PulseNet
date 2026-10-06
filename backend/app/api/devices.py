@@ -46,10 +46,10 @@ def register_device(
             detail="Quiz not found",
         )
 
-    if quiz.status != "running":
+    if quiz.status != "draft":
         raise HTTPException(
             status_code=400,
-            detail="Quiz is not running",
+            detail="Quiz is not in draft status",
         )
 
     # --------------------------------------------------------
