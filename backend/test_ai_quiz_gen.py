@@ -249,6 +249,8 @@ except ValueError:
 
 print("\n--- AI output normalization ---")
 
+ORIGINAL_CALL_GEMINI = ai_quiz_gen.call_gemini_api
+
 ai_quiz_gen.call_gemini_api = fake_gemini_ok
 
 rows = generate_questions_from_text(DOC_TEXT, 5)
@@ -284,6 +286,57 @@ prompt = ai_quiz_gen.build_prompt(DOC_TEXT, 7, "vietnamese")
 check("Prompt asks for 7", "exactly 7" in prompt)
 check("Prompt Vietnamese rule", "in Vietnamese" in prompt)
 check("Prompt carries document", "Bluetooth Low Energy" in prompt)
+
+print("\n--- Fallback chain ---")
+
+ai_quiz_gen.RETRY_SLEEP_SEC = 0
+
+# The fallback logic lives inside the real call_gemini_api, so
+# undo the mock used by the normalization tests above.
+ai_quiz_gen.call_gemini_api = ORIGINAL_CALL_GEMINI
+ORIGINAL_GENERATE_ONCE = ai_quiz_gen._generate_content_once
+
+calls = []
+
+
+def flaky_gemini(model, payload):
+    calls.append(model)
+
+    if model == "primary-model":
+        raise ai_quiz_gen._ModelUnavailable("overloaded")
+
+    return fake_gemini_ok(payload)
+
+
+os.environ["GEMINI_MODEL"] = "primary-model"
+os.environ["GEMINI_FALLBACK_MODELS"] = "fallback-a, fallback-b"
+ai_quiz_gen._generate_content_once = flaky_gemini
+
+rows = generate_questions_from_text(DOC_TEXT, 5)
+
+check("Fallback produced rows", len(rows) == 2)
+check(
+    "Primary retried then fallback used",
+    calls == ["primary-model"] * (ai_quiz_gen.OVERLOAD_RETRIES + 1) + ["fallback-a"],
+    f"(got {calls})",
+)
+
+ai_quiz_gen._generate_content_once = (
+    lambda m, p: (_ for _ in ()).throw(ai_quiz_gen._ModelUnavailable("down"))
+)
+try:
+    generate_questions_from_text(DOC_TEXT, 5)
+    check("All models down raises", False)
+except ai_quiz_gen.AIGenerationError as exc:
+    check("All models down raises", "busy or unavailable" in str(exc))
+
+os.environ.pop("GEMINI_MODEL", None)
+os.environ.pop("GEMINI_FALLBACK_MODELS", None)
+ai_quiz_gen.RETRY_SLEEP_SEC = 2.0
+
+# Re-mock for the endpoint tests and undo the transport patch.
+ai_quiz_gen._generate_content_once = ORIGINAL_GENERATE_ONCE
+ai_quiz_gen.call_gemini_api = fake_gemini_ok
 
 print("\n--- API endpoints ---")
 
