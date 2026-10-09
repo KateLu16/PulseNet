@@ -1,7 +1,10 @@
 import asyncio
 import json
+import sys
+import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 
 from bleak import BleakClient
 
@@ -13,6 +16,25 @@ from bleak import BleakClient
 DEVICE_ADDRESS = "54:43:B2:DC:B0:B2"
 
 FASTAPI_URL = "http://127.0.0.1:8000"
+
+# Whole-quiz countdown (seconds) used when the teacher has
+# not set a custom time limit on the dashboard.
+QUIZ_DEFAULT_TIME_LIMIT_SEC = 300
+
+# How often the gateway re-reads quiz state from the backend.
+QUIZ_POLL_INTERVAL = 1.5
+
+# Headless mode: run without the interactive menu so the
+# gateway can be daemonized with nohup/systemd. Active
+# automatically when stdin is not a TTY (e.g. background
+# start via start_gateway.sh).
+INTERACTIVE = sys.stdin.isatty()
+
+HEARTBEAT_INTERVAL = 2.0
+
+QUESTION_POLL_INTERVAL = 1.5
+
+RECONNECT_DELAY = 3.0
 
 
 # ============================================================
@@ -50,6 +72,36 @@ ACK_CHAR_UUID = (
 #
 ACTIVE_QUIZ_ID = None
 ACTIVE_SESSION_ID = None
+
+# Mirrored quiz attributes for QUIZ_INFO packets and the
+# quiz countdown.
+ACTIVE_QUIZ_TITLE = ""
+ACTIVE_QUIZ_STATUS = ""
+ACTIVE_QUIZ_TIME_LIMIT = 300
+ACTIVE_QUIZ_EXPECTED = 0
+ACTIVE_QUIZ_PREFIX = ""
+ACTIVE_QUIZ_ID_LENGTH = 0
+
+# Last question number pushed to the device by the
+# auto-push loop (None = nothing pushed yet).
+LAST_PUSHED_QUESTION = None
+
+# When the current question was pushed, and whether we are
+# still waiting for an answer to it (informational only —
+# the quiz countdown is global, not per question).
+PUSHED_AT = 0.0
+
+# Question list cache per quiz (for self-paced advancing).
+QUIZ_QUESTIONS = []
+QUIZ_QUESTIONS_QUIZ_ID = None
+
+# (quiz_id, status, time_limit) of the last QUIZ_INFO packet
+# sent to the device, so we only resend when something
+# actually changed.
+QUIZ_SENT_INFO_KEY = None
+
+# Quiz id for which a QUIZ_END has already been sent.
+QUIZ_END_SENT_QUIZ = None
 
 
 # ============================================================
@@ -355,6 +407,47 @@ def http_post_json(
             f"Reason: {e}"
         )
 
+        return False, None
+
+
+# ============================================================
+# QUIET HTTP HELPERS
+# For background loops (heartbeat, question poll):
+# no logging — they run every 1.5-2 seconds.
+# ============================================================
+
+def http_get_json_quiet(url):
+    try:
+        with urllib.request.urlopen(
+            url,
+            timeout=5,
+        ) as response:
+            body = response.read().decode("utf-8")
+            if not (200 <= response.status < 300):
+                return False, None
+            return True, json.loads(body)
+    except Exception:
+        return False, None
+
+
+def http_post_json_quiet(url, payload):
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(
+            request,
+            timeout=5,
+        ) as response:
+            body = response.read().decode("utf-8")
+            if not (200 <= response.status < 300):
+                return False, None
+            return True, json.loads(body)
+    except Exception:
         return False, None
 
 
@@ -1669,6 +1762,23 @@ async def process_answer(
         correct=is_correct,
     )
 
+    # ------------------------------------------------
+    # SELF-PACED ADVANCE: push the next question right
+    # after the answer is accepted.
+    # ------------------------------------------------
+
+    try:
+        answered_number = int(
+            str(question_id).replace("Q", "")
+        )
+    except ValueError:
+        answered_number = LAST_PUSHED_QUESTION or 0
+
+    await push_next_question(
+        client,
+        answered_number,
+    )
+
 
 # ============================================================
 # ANSWER CALLBACK
@@ -1840,6 +1950,551 @@ async def send_current_question(
         )
 
         return False
+
+
+# ============================================================
+# SELF-PACED QUESTION ADVANCE
+# After a student answers (or the time runs out), the
+# gateway pushes the next question to the device without
+# waiting for the teacher.
+# ============================================================
+
+async def ensure_questions_cache():
+    """
+    Load the quiz's question list once per quiz.
+
+    An EMPTY cache is re-fetched on every call: questions
+    may have been imported after the first load (e.g. the
+    gateway connected before the teacher finished importing).
+    """
+    global QUIZ_QUESTIONS
+    global QUIZ_QUESTIONS_QUIZ_ID
+
+    if ACTIVE_QUIZ_ID is None:
+        return False
+
+    if (
+        QUIZ_QUESTIONS_QUIZ_ID == ACTIVE_QUIZ_ID
+        and QUIZ_QUESTIONS
+    ):
+        return True
+
+    url = (
+        f"{FASTAPI_URL}/api/quizzes/"
+        f"{ACTIVE_QUIZ_ID}/questions"
+    )
+
+    success, questions = await asyncio.to_thread(
+        http_get_json_quiet,
+        url,
+    )
+
+    if not success or not isinstance(questions, list):
+        return False
+
+    previous_count = len(QUIZ_QUESTIONS)
+
+    QUIZ_QUESTIONS = sorted(
+        questions,
+        key=lambda q: q.get("question_number") or 0,
+    )
+
+    QUIZ_QUESTIONS_QUIZ_ID = ACTIVE_QUIZ_ID
+
+    if len(QUIZ_QUESTIONS) != previous_count:
+        print(
+            f"[CACHE] {len(QUIZ_QUESTIONS)} questions "
+            f"loaded for quiz {ACTIVE_QUIZ_ID}."
+        )
+
+    return bool(QUIZ_QUESTIONS)
+
+
+async def send_question_dict(
+    client,
+    question,
+):
+    """
+    Send one QUESTION packet (from the cache) to the device.
+    """
+    global LAST_PUSHED_QUESTION
+    global PUSHED_AT
+
+    question_number = int(
+        question["question_number"]
+    )
+
+    question_id = f"Q{question_number:02d}"
+
+    packet = {
+        "type": "QUESTION",
+        "session_id": ACTIVE_SESSION_ID,
+        "quiz_id": ACTIVE_QUIZ_ID,
+        "question_id": question_id,
+        "number": question_number,
+        "total": len(QUIZ_QUESTIONS),
+        "question": question["question_text"],
+        "A": question["option_a"],
+        "B": question["option_b"],
+        "C": question["option_c"],
+        "D": question["option_d"],
+    }
+
+    data = json.dumps(
+        packet,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    print()
+    print("======================================")
+    print("[QUESTION TX]")
+    print(f"Quiz ID  : {ACTIVE_QUIZ_ID}")
+    print(f"Question : {question_id}")
+    print("======================================")
+
+    try:
+        question_char = get_characteristic(
+            client,
+            QUESTION_CHAR_UUID,
+        )
+
+        await client.write_gatt_char(
+            question_char,
+            data,
+            response=True,
+        )
+
+        LAST_PUSHED_QUESTION = question_number
+        PUSHED_AT = time.time()
+
+        print(
+            "[OK] Question sent to device."
+        )
+
+        return True
+
+    except Exception as e:
+        print(
+            f"[ERROR] Failed to send question: {e}"
+        )
+
+        return False
+
+
+async def push_next_question(
+    client,
+    after_number,
+):
+    """
+    Push the question right after `after_number`.
+    Returns False when there are no more questions.
+    """
+
+    if not await ensure_questions_cache():
+        return False
+
+    for question in QUIZ_QUESTIONS:
+        number = question.get("question_number")
+
+        if number is not None and number > after_number:
+            print(
+                f"[AUTO] Advancing to question "
+                f"{number}..."
+            )
+
+            return await send_question_dict(
+                client,
+                question,
+            )
+
+    # All questions answered — the device stays on its
+    # "answered all, waiting" screen until the quiz time
+    # expires (or the teacher finishes the quiz), then the
+    # gateway sends QUIZ_END with the final result screen.
+    print(
+        "[AUTO] No more questions for this student."
+    )
+
+    return False
+
+
+# ============================================================
+# BACKGROUND LOOP - HEARTBEAT
+# Gateway -> FastAPI -> Teacher dashboard
+# ============================================================
+
+async def heartbeat_loop():
+    """
+    Report gateway status to FastAPI every HEARTBEAT_INTERVAL
+    seconds — including while waiting for the device to
+    appear — so the dashboard can tell "gateway running,
+    waiting for device" from "gateway not running".
+    """
+    url = f"{FASTAPI_URL}/api/gateway/heartbeat"
+
+    while True:
+        client = current_client
+
+        payload = {
+            "connected": bool(
+                client is not None and client.is_connected
+            ),
+            "device_address": DEVICE_ADDRESS,
+            "quiz_id": ACTIVE_QUIZ_ID,
+            "registered_count": len(registered_devices),
+            "last_pushed_question": LAST_PUSHED_QUESTION,
+        }
+
+        # to_thread: keep the event loop free for BLE events.
+        await asyncio.to_thread(
+            http_post_json_quiet,
+            url,
+            payload,
+        )
+
+        await asyncio.sleep(HEARTBEAT_INTERVAL)
+
+
+# ============================================================
+# BACKGROUND LOOP - QUIZ WATCH
+# FastAPI -> Gateway -> ESP32
+#
+# Watches quiz state on the backend:
+# - new quiz / start / time limit change -> send QUIZ_INFO
+# - quiz starts                          -> push question 1
+# - quiz time expires                    -> finish + QUIZ_END
+# - teacher finishes on the dashboard    -> QUIZ_END
+#
+# Self-paced advancing to the next question after each
+# answer is handled in process_answer -> push_next_question.
+#
+# NOTE: questions are NEVER re-pushed based on the backend's
+# current_question_number — that caused the device to jump
+# back to an old question while students worked ahead.
+# ============================================================
+
+def parse_iso_utc(value):
+    """
+    '2026-10-07T19:35:18.485264' -> POSIX seconds (UTC).
+    """
+    if not value:
+        return None
+
+    try:
+        dt = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    return dt.timestamp()
+
+
+async def send_quiz_info(client):
+    """
+    Tell the device which quiz is active:
+    title, status, time limit and total questions.
+    """
+    global QUIZ_SENT_INFO_KEY
+
+    await ensure_questions_cache()
+
+    packet = {
+        "type": "QUIZ_INFO",
+        "quiz_id": ACTIVE_QUIZ_ID,
+        "title": ACTIVE_QUIZ_TITLE,
+        "status": ACTIVE_QUIZ_STATUS,
+        "time_limit": ACTIVE_QUIZ_TIME_LIMIT,
+        "total": len(QUIZ_QUESTIONS),
+        "expected": ACTIVE_QUIZ_EXPECTED,
+        "prefix": ACTIVE_QUIZ_PREFIX,
+        "id_length": ACTIVE_QUIZ_ID_LENGTH,
+    }
+
+    try:
+        ack_char = get_characteristic(
+            client,
+            ACK_CHAR_UUID,
+        )
+
+        await client.write_gatt_char(
+            ack_char,
+            json.dumps(
+                packet,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+            response=True,
+        )
+
+        QUIZ_SENT_INFO_KEY = (
+            ACTIVE_QUIZ_ID,
+            ACTIVE_QUIZ_STATUS,
+            ACTIVE_QUIZ_TIME_LIMIT,
+            len(QUIZ_QUESTIONS),
+        )
+
+        print(
+            f"[INFO] QUIZ_INFO sent: {packet}"
+        )
+
+        return True
+
+    except Exception as e:
+        print(
+            f"[ERROR] QUIZ_INFO failed: {e}"
+        )
+
+        return False
+
+
+async def send_quiz_end(client):
+    """
+    Tell the device the quiz is over so it can show the
+    final result (correct count / total and score /10).
+    """
+    global QUIZ_END_SENT_QUIZ
+
+    packet = {
+        "type": "QUIZ_END",
+        "quiz_id": ACTIVE_QUIZ_ID,
+    }
+
+    try:
+        ack_char = get_characteristic(
+            client,
+            ACK_CHAR_UUID,
+        )
+
+        await client.write_gatt_char(
+            ack_char,
+            json.dumps(
+                packet,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+            response=True,
+        )
+
+        QUIZ_END_SENT_QUIZ = ACTIVE_QUIZ_ID
+
+        print("[INFO] QUIZ_END sent to device.")
+
+        return True
+
+    except Exception as e:
+        print(
+            f"[ERROR] QUIZ_END failed: {e}"
+        )
+
+        return False
+
+
+async def quiz_watch_loop(client):
+    global ACTIVE_QUIZ_ID
+    global ACTIVE_SESSION_ID
+    global ACTIVE_QUIZ_TITLE
+    global ACTIVE_QUIZ_STATUS
+    global ACTIVE_QUIZ_TIME_LIMIT
+    global ACTIVE_QUIZ_EXPECTED
+    global ACTIVE_QUIZ_PREFIX
+    global ACTIVE_QUIZ_ID_LENGTH
+    global QUIZ_SENT_INFO_KEY
+    global QUIZ_END_SENT_QUIZ
+    global LAST_PUSHED_QUESTION
+    global QUIZ_QUESTIONS_QUIZ_ID
+
+    quizzes_url = f"{FASTAPI_URL}/api/quizzes"
+
+    while True:
+        try:
+            if not client.is_connected:
+                await asyncio.sleep(QUIZ_POLL_INTERVAL)
+                continue
+
+            success, quizzes = await asyncio.to_thread(
+                http_get_json_quiet,
+                quizzes_url,
+            )
+
+            if not success or not isinstance(quizzes, list):
+                await asyncio.sleep(QUIZ_POLL_INTERVAL)
+                continue
+
+            running = [
+                quiz
+                for quiz in quizzes
+                if quiz.get("status") == "running"
+            ]
+
+            lobbies = [
+                quiz
+                for quiz in quizzes
+                if quiz.get("status") == "lobby"
+            ]
+
+            drafts = [
+                quiz
+                for quiz in quizzes
+                if quiz.get("status") == "draft"
+            ]
+
+            # Priority: running > lobby > newest draft.
+            if running:
+                quiz = running[0]
+            elif lobbies:
+                quiz = lobbies[0]
+            elif drafts:
+                drafts.sort(
+                    key=lambda q: q.get("id") or 0,
+                    reverse=True,
+                )
+                quiz = drafts[0]
+            else:
+                quiz = None
+
+            if quiz is None:
+                if ACTIVE_QUIZ_ID is not None:
+                    ACTIVE_QUIZ_ID = None
+                    ACTIVE_SESSION_ID = None
+                    ACTIVE_QUIZ_TITLE = ""
+                    ACTIVE_QUIZ_STATUS = ""
+                    QUIZ_SENT_INFO_KEY = None
+
+                await asyncio.sleep(QUIZ_POLL_INTERVAL)
+                continue
+
+            quiz_id = quiz.get("id")
+            status = quiz.get("status") or ""
+            title = quiz.get("title") or ""
+
+            time_limit = (
+                quiz.get("time_limit_sec")
+                or QUIZ_DEFAULT_TIME_LIMIT_SEC
+            )
+
+            expected = quiz.get("expected_students") or 0
+            prefix = quiz.get("id_prefix") or ""
+            id_length = quiz.get("id_length") or 0
+
+            # --------------------------------------------
+            # Active quiz changed
+            # --------------------------------------------
+
+            if quiz_id != ACTIVE_QUIZ_ID:
+                ACTIVE_QUIZ_ID = quiz_id
+                ACTIVE_SESSION_ID = f"QUIZ-{quiz_id}"
+                ACTIVE_QUIZ_TITLE = title
+                ACTIVE_QUIZ_STATUS = status
+                ACTIVE_QUIZ_TIME_LIMIT = time_limit
+                ACTIVE_QUIZ_EXPECTED = expected
+                ACTIVE_QUIZ_PREFIX = prefix
+                ACTIVE_QUIZ_ID_LENGTH = id_length
+
+                # Force a question-cache reload.
+                QUIZ_QUESTIONS_QUIZ_ID = None
+                LAST_PUSHED_QUESTION = None
+                QUIZ_END_SENT_QUIZ = None
+
+                print(
+                    f"[WATCH] Following quiz {quiz_id} "
+                    f"'{title}' ({status})."
+                )
+
+            else:
+                ACTIVE_QUIZ_TITLE = title
+                ACTIVE_QUIZ_STATUS = status
+                ACTIVE_QUIZ_TIME_LIMIT = time_limit
+                ACTIVE_QUIZ_EXPECTED = expected
+                ACTIVE_QUIZ_PREFIX = prefix
+                ACTIVE_QUIZ_ID_LENGTH = id_length
+
+            # --------------------------------------------
+            # QUIZ_INFO whenever something changed
+            # (status, time limit, question count)
+            # --------------------------------------------
+
+            await ensure_questions_cache()
+
+            info_key = (
+                ACTIVE_QUIZ_ID,
+                ACTIVE_QUIZ_STATUS,
+                ACTIVE_QUIZ_TIME_LIMIT,
+                len(QUIZ_QUESTIONS),
+            )
+
+            if info_key != QUIZ_SENT_INFO_KEY:
+                # Force a question-cache reload so QUIZ_INFO
+                # and the Q1 push see fresh data.
+                QUIZ_QUESTIONS_QUIZ_ID = None
+
+                await ensure_questions_cache()
+
+                await send_quiz_info(client)
+
+            # --------------------------------------------
+            # Running quiz lifecycle
+            # --------------------------------------------
+
+            if ACTIVE_QUIZ_STATUS == "running":
+
+                started = parse_iso_utc(
+                    quiz.get("started_at")
+                )
+
+                deadline = (
+                    started + ACTIVE_QUIZ_TIME_LIMIT
+                    if started
+                    else None
+                )
+
+                if deadline and time.time() >= deadline:
+                    print(
+                        "[WATCH] Quiz time expired — "
+                        "finishing quiz."
+                    )
+
+                    await asyncio.to_thread(
+                        http_post_json_quiet,
+                        f"{FASTAPI_URL}/api/quizzes/"
+                        f"{ACTIVE_QUIZ_ID}/finish",
+                        {},
+                    )
+
+                    if QUIZ_END_SENT_QUIZ != ACTIVE_QUIZ_ID:
+                        await send_quiz_end(client)
+
+                    await asyncio.sleep(QUIZ_POLL_INTERVAL)
+                    continue
+
+                # Push Q1 right after the quiz starts.
+                if (
+                    LAST_PUSHED_QUESTION is None
+                    and QUIZ_END_SENT_QUIZ != ACTIVE_QUIZ_ID
+                ):
+                    await ensure_questions_cache()
+
+                    if QUIZ_QUESTIONS:
+                        await send_question_dict(
+                            client,
+                            QUIZ_QUESTIONS[0],
+                        )
+
+            elif ACTIVE_QUIZ_STATUS == "finished":
+
+                if QUIZ_END_SENT_QUIZ != ACTIVE_QUIZ_ID:
+                    print(
+                        "[WATCH] Quiz finished by teacher — "
+                        "notifying device."
+                    )
+
+                    await send_quiz_end(client)
+
+        except Exception as e:
+            print(
+                f"[ERROR] Quiz watch loop: {e}"
+            )
+
+        await asyncio.sleep(QUIZ_POLL_INTERVAL)
 
 
 # ============================================================
@@ -2152,8 +2807,9 @@ def print_gatt_services(
 # MAIN
 # ============================================================
 
-async def main():
+async def run_gateway_session():
     global current_client
+    global LAST_PUSHED_QUESTION
 
     print("======================================")
     print("       PulseNet BLE Gateway")
@@ -2176,6 +2832,10 @@ async def main():
         ) as client:
 
             current_client = client
+
+            # Re-push the current question after every
+            # (re)connect so the device is never left behind.
+            LAST_PUSHED_QUESTION = None
 
             # ------------------------------------------------
             # BLE CONNECTED
@@ -2293,12 +2953,39 @@ async def main():
             print("======================================")
 
             # ------------------------------------------------
-            # MENU
+            # BACKGROUND LOOP (auto question push)
+            # (heartbeat runs globally from main(), so it
+            # keeps reporting even between reconnects)
             # ------------------------------------------------
 
-            await menu_loop(
-                client
+            push_task = asyncio.create_task(
+                quiz_watch_loop(client)
             )
+
+            # ------------------------------------------------
+            # RUN: interactive menu, or headless forever
+            # ------------------------------------------------
+
+            try:
+                if INTERACTIVE:
+                    await menu_loop(client)
+                else:
+                    print(
+                        "[INFO] Headless mode — "
+                        "questions are pushed to the device "
+                        "automatically. Ctrl+C to stop."
+                    )
+
+                    while True:
+                        if not client.is_connected:
+                            raise RuntimeError(
+                                "BLE device disconnected"
+                            )
+
+                        await asyncio.sleep(2)
+
+            finally:
+                push_task.cancel()
 
             # ------------------------------------------------
             # CLEANUP
@@ -2335,7 +3022,7 @@ async def main():
 
         print()
         print("======================================")
-        print("[ERROR] BLE Gateway failed")
+        print("[WARN] BLE session ended")
         print("======================================")
 
         print(
@@ -2349,6 +3036,37 @@ async def main():
         print(
             "======================================"
         )
+
+        raise
+
+
+# ============================================================
+# MAIN LOOP
+# Connect -> run -> auto-reconnect on loss
+# ============================================================
+
+async def main():
+    # Global heartbeat: reports "running" even while waiting
+    # for the device to appear or reconnecting.
+    heartbeat_task = asyncio.create_task(
+        heartbeat_loop()
+    )
+
+    while True:
+        try:
+            await run_gateway_session()
+
+            # Session ended via menu option 7 — clean stop.
+            heartbeat_task.cancel()
+            return
+
+        except Exception:
+            print(
+                f"[INFO] Reconnecting in "
+                f"{RECONNECT_DELAY}s..."
+            )
+
+            await asyncio.sleep(RECONNECT_DELAY)
 
 
 # ============================================================

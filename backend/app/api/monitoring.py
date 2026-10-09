@@ -1,5 +1,8 @@
 
+import time
+
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import Integer, cast, func, select
 from sqlalchemy.orm import Session
 
@@ -16,6 +19,55 @@ router = APIRouter(
     prefix="/api",
     tags=["monitoring"],
 )
+
+
+# ============================================================
+# GATEWAY STATUS
+#
+# The BLE gateway (gateway/send_ack.py) POSTs a heartbeat
+# every 2 seconds. The teacher dashboard polls
+# /api/gateway/status to show whether the gateway is
+# running and whether a device is connected over BLE.
+#
+# State is kept in memory: it is transient by nature and
+# the gateway re-populates it within seconds of a backend
+# restart.
+# ============================================================
+
+GATEWAY_OFFLINE_AFTER_SECONDS = 6.0
+
+_gateway_state = {
+    "last_seen": 0.0,
+    "payload": {},
+}
+
+
+class GatewayHeartbeat(BaseModel):
+    connected: bool = False
+    device_address: str = ""
+    quiz_id: int | None = None
+    registered_count: int = 0
+    last_pushed_question: int | None = None
+
+
+@router.post("/gateway/heartbeat")
+def gateway_heartbeat(data: GatewayHeartbeat):
+    _gateway_state["last_seen"] = time.time()
+    _gateway_state["payload"] = data.model_dump()
+    return {"ok": True}
+
+
+@router.get("/gateway/status")
+def gateway_status():
+    payload = dict(_gateway_state["payload"])
+    age = time.time() - _gateway_state["last_seen"]
+    online = age < GATEWAY_OFFLINE_AFTER_SECONDS
+
+    return {
+        "online": online,
+        "last_seen_seconds_ago": round(age, 1) if online else None,
+        **payload,
+    }
 
 
 @router.get("/quizzes/{quiz_id}/students")
@@ -44,6 +96,13 @@ def get_quiz_students(
             func.sum(
                 cast(Response.is_correct, Integer)
             ).label("correct_count"),
+            func.max(
+                Question.question_number
+            ).label("last_answered_question"),
+        )
+        .join(
+            Question,
+            Question.id == Response.question_id,
         )
         .where(Response.quiz_id == quiz_id)
         .group_by(Response.student_id)
@@ -74,6 +133,7 @@ def get_quiz_students(
                 response_stats.c.correct_count,
                 0,
             ).label("correct_count"),
+            response_stats.c.last_answered_question,
         )
         .join(
             Student,
@@ -120,9 +180,16 @@ def get_quiz_students(
                 "registered_at": row.registered_at,
                 "answered_count": answered_count,
                 "correct_count": correct_count,
-                "wrong_count": wrong_count,
+                "wrong_count": max(answered_count - correct_count, 0),
                 "total_questions": total_questions,
                 "score": score,
+                # Highest question number the student has
+                # answered — the dashboard shows "now on Qn".
+                "last_answered_question": (
+                    int(row.last_answered_question)
+                    if row.last_answered_question is not None
+                    else 0
+                ),
             }
         )
 

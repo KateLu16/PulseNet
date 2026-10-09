@@ -47,10 +47,10 @@ def register_device(
         )
 
     # Students register while the quiz is still draft
-    # (before the teacher starts it) but may also join
-    # late while it is running.
+    # (before the teacher starts it), during the lobby
+    # (Kahoot-style entry window), or late while running.
 
-    if quiz.status not in ("draft", "running"):
+    if quiz.status not in ("draft", "lobby", "running"):
         raise HTTPException(
             status_code=400,
             detail=(

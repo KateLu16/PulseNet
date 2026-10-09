@@ -6,7 +6,11 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.quiz import Quiz
 from app.models.question import Question
-from app.schemas.quiz import QuizCreateRequest, QuizResponse
+from app.schemas.quiz import (
+    QuizCreateRequest,
+    QuizResponse,
+    QuizSetupRequest,
+)
 
 
 router = APIRouter(
@@ -83,6 +87,154 @@ def get_quiz(
         )
 
     return quiz
+
+
+# ============================================================
+# QUIZ SETUP
+# Time limit, expected student count and student-ID format.
+# Kahoot-style: the teacher configures everything BEFORE
+# pushing the session to the devices.
+# ============================================================
+
+@router.post(
+    "/{quiz_id}/setup",
+)
+def setup_quiz(
+    quiz_id: int,
+    data: QuizSetupRequest,
+    db: Session = Depends(get_db),
+):
+    quiz = (
+        db.query(Quiz)
+        .filter(Quiz.id == quiz_id)
+        .first()
+    )
+
+    if quiz is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Quiz not found",
+        )
+
+    if quiz.status not in ("draft", "lobby"):
+        raise HTTPException(
+            status_code=400,
+            detail="Quiz can only be configured before it starts",
+        )
+
+    if data.time_limit_sec is not None:
+        quiz.time_limit_sec = data.time_limit_sec
+
+    if data.expected_students is not None:
+        quiz.expected_students = data.expected_students
+
+    if data.id_prefix is not None:
+        quiz.id_prefix = data.id_prefix.strip() or None
+
+    if data.id_length is not None:
+        quiz.id_length = data.id_length
+
+    db.commit()
+    db.refresh(quiz)
+
+    return quiz
+
+
+# ============================================================
+# LOBBY (Kahoot-style)
+# draft -> lobby: session pushed to the devices; students
+# enter their IDs while the teacher watches the count.
+# ============================================================
+
+@router.post(
+    "/{quiz_id}/lobby",
+)
+def open_lobby(
+    quiz_id: int,
+    db: Session = Depends(get_db),
+):
+    quiz = (
+        db.query(Quiz)
+        .filter(Quiz.id == quiz_id)
+        .first()
+    )
+
+    if quiz is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Quiz not found",
+        )
+
+    if quiz.status != "draft":
+        raise HTTPException(
+            status_code=400,
+            detail="Only a draft quiz can be pushed to devices",
+        )
+
+    has_questions = (
+        db.query(Question)
+        .filter(Question.quiz_id == quiz_id)
+        .first()
+        is not None
+    )
+
+    if not has_questions:
+        raise HTTPException(
+            status_code=400,
+            detail="Quiz has no questions",
+        )
+
+    quiz.status = "lobby"
+
+    db.commit()
+    db.refresh(quiz)
+
+    return {
+        "quiz_id": quiz.id,
+        "status": quiz.status,
+        "message": "Lobby opened — devices now accept student IDs",
+    }
+
+
+# ============================================================
+# CANCEL LOBBY
+# lobby -> draft: pull the session back for reconfiguration.
+# ============================================================
+
+@router.post(
+    "/{quiz_id}/cancel",
+)
+def cancel_lobby(
+    quiz_id: int,
+    db: Session = Depends(get_db),
+):
+    quiz = (
+        db.query(Quiz)
+        .filter(Quiz.id == quiz_id)
+        .first()
+    )
+
+    if quiz is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Quiz not found",
+        )
+
+    if quiz.status != "lobby":
+        raise HTTPException(
+            status_code=400,
+            detail="Quiz is not in the lobby state",
+        )
+
+    quiz.status = "draft"
+
+    db.commit()
+    db.refresh(quiz)
+
+    return {
+        "quiz_id": quiz.id,
+        "status": quiz.status,
+    }
 
 
 # ============================================================

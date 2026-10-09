@@ -202,18 +202,12 @@ def submit_answer(
         )
 
     # ========================================================
-    # 8. CHECK CURRENT QUESTION
+    # 8. SELF-PACED QUIZ
+    #
+    # Students answer at their own pace, so ANY question of
+    # this quiz is accepted — not just the teacher's
+    # current_question_number.
     # ========================================================
-
-    if (
-        quiz.current_question_number is not None
-        and question.question_number
-        != quiz.current_question_number
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail="Question is not the current quiz question",
-        )
 
     # ========================================================
     # 9. CHECK ANSWER

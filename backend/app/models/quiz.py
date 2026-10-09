@@ -30,6 +30,31 @@ class Quiz(Base):
         nullable=True,
     )
 
+    # Whole-quiz time limit in seconds (shown on the device
+    # as a countdown; the quiz auto-finishes when it expires).
+    time_limit_sec: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
+    # Lobby settings (Kahoot-style): how many students the
+    # teacher expects, and the student-ID format used for
+    # device-side validation.
+    expected_students: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
+    id_prefix: Mapped[str | None] = mapped_column(
+        String(20),
+        nullable=True,
+    )
+
+    id_length: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         default=datetime.utcnow,

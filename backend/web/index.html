@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PulseNet — Teacher</title>
+    <link rel="stylesheet" href="/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><polygon fill='%232F6FED' points='13 2 3 14 12 14 11 22 21 10 12 10 13 2'/></svg>">
+</head>
+<body>
+
+<div class="layout">
+
+    <!-- ==================== SIDEBAR ==================== -->
+
+    <aside class="sidebar">
+        <div class="brand">
+            <span class="brand-mark">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            </span>
+            <div>
+                <div class="brand-name">PulseNet</div>
+                <div class="brand-sub" data-i18n="app.subtitle">Wireless classroom quiz system</div>
+            </div>
+        </div>
+
+        <nav class="side-nav" id="tabNav">
+            <button class="tab active" data-tab="setup">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+                <span data-i18n="tabs.setup">Setup</span>
+            </button>
+            <button class="tab" data-tab="live">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                <span data-i18n="tabs.live">Live session</span>
+            </button>
+            <button class="tab" data-tab="results">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="7"/><polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88"/></svg>
+                <span data-i18n="tabs.results">Results</span>
+            </button>
+            <button class="tab" data-tab="stats">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+                <span data-i18n="tabs.stats">Statistics</span>
+            </button>
+        </nav>
+
+        <div class="side-foot">
+            <div class="teacher">
+                <span class="teacher-avatar">T</span>
+                <div>
+                    <div class="teacher-name" data-i18n="app.teacher">Teacher</div>
+                    <div class="teacher-role" data-i18n="app.teacherRole">Room console</div>
+                </div>
+            </div>
+            <div class="conn" id="gwStatus" data-i18n-title="gw.title">
+                <span class="dot dot-gray"></span>
+                <span id="gwText">…</span>
+            </div>
+            <div class="conn" id="connStatus">
+                <span class="dot dot-gray"></span>
+                <span id="connText" data-i18n="conn.connecting">Connecting…</span>
+            </div>
+        </div>
+    </aside>
+
+    <!-- ==================== MAIN ==================== -->
+
+    <div class="main">
+
+        <header class="topbar">
+            <div>
+                <h1 id="pageTitle" data-i18n="page.setup.t">Session setup</h1>
+                <p class="muted" id="pageSub" data-i18n="page.setup.s">Import questions and configure the class session</p>
+            </div>
+            <div class="topbar-right">
+                <button id="langBtn" class="lang-btn" title="Change language">VI</button>
+            </div>
+        </header>
+
+        <!-- Quiz bar -->
+
+        <section class="quizbar card">
+            <div class="quizbar-row">
+                <label class="field-label" for="quizSelect" data-i18n="quiz.label">Quiz</label>
+                <select id="quizSelect" class="input select"></select>
+                <button id="refreshQuizzesBtn" class="btn btn-ghost btn-icon" data-i18n-title="quiz.refresh" title="Reload quiz list">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                </button>
+                <span class="quizbar-sep"></span>
+                <input id="newQuizTitle" class="input" type="text" data-i18n-ph="quiz.newPlaceholder" placeholder="New quiz name, e.g. IoT Midterm">
+                <button id="createQuizBtn" class="btn btn-primary" data-i18n="quiz.create">Create</button>
+            </div>
+        </section>
+
+        <!-- Empty state -->
+
+        <main id="emptyState" class="empty card hidden">
+            <div class="status-icon blue">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+            </div>
+            <p data-i18n="empty.title">No quiz selected.</p>
+            <p class="muted" data-i18n="empty.hint">Create a new quiz above, or pick one from the list.</p>
+        </main>
+
+        <!-- Quiz panel -->
+
+        <main id="quizPanel" class="hidden">
+
+            <div class="quiz-head">
+                <h2 id="quizTitle">—</h2>
+                <span id="quizBadge" class="badge">—</span>
+            </div>
+
+            <!-- ============ TAB: SETUP ============ -->
+
+            <section id="tab-setup" class="tabpane">
+
+                <div class="grid-2">
+
+                    <div class="card">
+                        <h3 data-i18n="setup.importTitle">Import questions</h3>
+                        <p class="muted" data-i18n="setup.importHint">CSV columns: <code>Question, A, B, C, D, Correct Answer</code>. The whole file is validated before anything is saved.</p>
+
+                        <div class="import-row">
+                            <label class="btn btn-ghost file-btn">
+                                <span data-i18n="setup.pickFile">Choose CSV</span>
+                                <input type="file" id="csvFile" accept=".csv" hidden>
+                            </label>
+                            <span id="csvFileName" class="muted" data-i18n="setup.noFile">No file selected</span>
+                        </div>
+
+                        <div class="import-actions">
+                            <button id="importBtn" class="btn btn-primary" disabled data-i18n="setup.importBtn">Import</button>
+                            <button id="templateBtn" class="btn btn-ghost" data-i18n-title="setup.template" data-i18n="setup.templateBtn" title="Download template">CSV template</button>
+                        </div>
+
+                        <div id="importResult" class="hidden"></div>
+                    </div>
+
+                    <div class="card">
+                        <h3 data-i18n="setup.settingsTitle">Session settings</h3>
+
+                        <div class="settings-grid">
+                            <div class="field">
+                                <label class="field-label" for="timeLimitInput" data-i18n="setup.timeLimit">Time limit (minutes)</label>
+                                <input id="timeLimitInput" class="input" type="number" min="1" max="180" placeholder="5">
+                            </div>
+                            <div class="field">
+                                <label class="field-label" for="expectedInput" data-i18n="setup.expected">Students in class</label>
+                                <input id="expectedInput" class="input" type="number" min="1" max="500" placeholder="30">
+                            </div>
+                            <div class="field">
+                                <label class="field-label" for="prefixInput" data-i18n="setup.prefix">Student ID prefix</label>
+                                <input id="prefixInput" class="input" type="text" placeholder="23134">
+                            </div>
+                            <div class="field">
+                                <label class="field-label" for="idLengthInput" data-i18n="setup.length">ID length</label>
+                                <input id="idLengthInput" class="input" type="number" min="1" max="20" placeholder="9">
+                            </div>
+                        </div>
+
+                        <button id="pushBtn" class="btn btn-primary btn-big btn-block" data-i18n="setup.pushBtn">Push to devices</button>
+                        <p class="muted small" data-i18n="setup.pushHint">Devices will show the quiz name and wait for students to enter their IDs.</p>
+                    </div>
+
+                </div>
+
+                <div class="card">
+                    <div class="card-head">
+                        <h3 data-i18n="setup.questionsList">Question list</h3>
+                        <span id="questionCount" class="chip">0</span>
+                    </div>
+                    <div class="table-wrap">
+                        <table class="table">
+                            <thead>
+                                <tr>
+                                    <th class="ta-c" data-i18n="setup.colNo">No.</th>
+                                    <th data-i18n="setup.colQuestion">Question</th>
+                                    <th>A</th><th>B</th><th>C</th><th>D</th>
+                                    <th class="ta-c" data-i18n="setup.colAnswer">Answer</th>
+                                </tr>
+                            </thead>
+                            <tbody id="questionsBody">
+                                <tr><td colspan="7" class="muted ta-c pad" data-i18n="setup.noQuestions">No questions yet.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+            </section>
+
+            <!-- ============ TAB: LIVE ============ -->
+
+            <section id="tab-live" class="tabpane hidden">
+
+                <!-- Draft -->
+                <div id="liveDraft" class="card status-card hidden">
+                    <div class="status-icon blue">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                    </div>
+                    <h3 data-i18n="live.draftTitle">Quiz not pushed yet</h3>
+                    <p class="muted" data-i18n="live.draftHint">Set up questions, time limit and class info in the Setup tab, then push the session to the devices.</p>
+                </div>
+
+                <!-- Lobby -->
+                <div id="liveLobby" class="hidden">
+                    <div class="card lobby-card">
+                        <div class="lobby-head">
+                            <h3 data-i18n="live.lobbyTitle">Lobby</h3>
+                            <span id="lobbyPin" class="chip chip-big"></span>
+                        </div>
+                        <div class="lobby-count">
+                            <div class="lobby-numbers">
+                                <span id="joinedCount" class="lobby-joined">0</span>
+                                <span class="lobby-expected" id="expectedCount">/ 0</span>
+                            </div>
+                            <div class="muted" data-i18n="live.joinedHint">students joined</div>
+                            <div class="progress"><div id="lobbyBar" class="progress-bar bar-green" style="width:0%"></div></div>
+                        </div>
+                        <div id="joinedList" class="joined-list"></div>
+                        <div class="lobby-actions">
+                            <button id="startBtn" class="btn btn-green btn-big" data-i18n="live.startBtn">Start quiz</button>
+                            <button id="cancelLobbyBtn" class="btn btn-ghost" data-i18n="live.cancelBtn">Cancel</button>
+                        </div>
+                        <p class="muted small" data-i18n="live.lobbyHint">Devices are accepting student IDs — start whenever everyone is in.</p>
+                    </div>
+                </div>
+
+                <!-- Running / Finished -->
+                <div id="liveRun" class="hidden">
+
+                    <div class="card control-card">
+                        <div class="control-row">
+                            <div class="clock-box">
+                                <span class="muted small" data-i18n="live.timeLeft">Time left</span>
+                                <span id="quizClock" class="clock">—</span>
+                            </div>
+                            <div class="control-actions">
+                                <button id="finishBtn" class="btn btn-red btn-big" data-i18n="live.finishBtn">Finish</button>
+                            </div>
+                        </div>
+                        <p id="liveHint" class="muted small"></p>
+                    </div>
+
+                    <div class="grid-2">
+                        <div class="card">
+                            <div class="card-head">
+                                <h3 data-i18n="live.progress">Progress</h3>
+                                <span id="progressCount" class="chip">0 / 0</span>
+                            </div>
+                            <div class="progress"><div id="progressBar" class="progress-bar" style="width:0%"></div></div>
+                            <div id="answeredList" class="answered-list muted"></div>
+                        </div>
+                        <div class="card">
+                            <div class="card-head">
+                                <h3 data-i18n="live.gatewayTitle">Gateway</h3>
+                                <span id="gwChip" class="chip">—</span>
+                            </div>
+                            <div id="gwInfo" class="muted small">—</div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-head">
+                            <h3 data-i18n="live.followTable">Live student tracker</h3>
+                            <span id="studentCount" class="chip">0</span>
+                        </div>
+                        <div class="table-wrap">
+                            <table class="table">
+                                <thead>
+                                    <tr>
+                                        <th data-i18n="live.colId">Student ID</th>
+                                        <th data-i18n="live.colDevice">Device (MAC)</th>
+                                        <th class="ta-c" data-i18n="live.colOn">On question</th>
+                                        <th class="ta-c" data-i18n="live.colAnswered">Answered</th>
+                                        <th class="ta-c" data-i18n="live.colCorrect">✓</th>
+                                        <th class="ta-c" data-i18n="live.colWrong">✗</th>
+                                        <th class="ta-c" data-i18n="live.colScore">Score</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="studentsBody">
+                                    <tr><td colspan="7" class="muted ta-c pad" data-i18n="live.noStudents">No students registered.</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <p class="muted small" data-i18n="live.followHint">Questions advance on each device right after a student answers — every student moves at their own pace under the same quiz clock.</p>
+                    </div>
+
+                </div>
+
+                <!-- Finished summary -->
+                <div id="liveFinished" class="card status-card hidden">
+                    <div class="status-icon violet">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
+                    </div>
+                    <h3 data-i18n="live.finishedTitle">Quiz finished</h3>
+                    <p class="muted" data-i18n="live.finishedHint">Check the Results and Statistics tabs for the full breakdown.</p>
+                </div>
+
+            </section>
+
+            <!-- ============ TAB: RESULTS ============ -->
+
+            <section id="tab-results" class="tabpane hidden">
+
+                <div class="stat-grid" id="overallCards"></div>
+
+                <div class="card">
+                    <div class="card-head">
+                        <h3 data-i18n="results.perStudent">Student results</h3>
+                        <span id="resultCount" class="chip">0</span>
+                    </div>
+                    <div class="table-wrap">
+                        <table class="table">
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th data-i18n="results.colId">Student ID</th>
+                                    <th class="ta-c" data-i18n="results.colAnswered">Answered</th>
+                                    <th class="ta-c" data-i18n="results.colCorrect">✓</th>
+                                    <th class="ta-c" data-i18n="results.colWrong">✗</th>
+                                    <th class="ta-c" data-i18n="results.colScore">Score</th>
+                                    <th class="ta-c" data-i18n="results.colAcc">Accuracy</th>
+                                </tr>
+                            </thead>
+                            <tbody id="resultsBody">
+                                <tr><td colspan="7" class="muted ta-c pad" data-i18n="results.empty">No data yet.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+            </section>
+
+            <!-- ============ TAB: STATISTICS ============ -->
+
+            <section id="tab-stats" class="tabpane hidden">
+
+                <div class="stat-grid" id="statsCards"></div>
+                <div id="questionStats" class="qstats">
+                    <div class="card"><p class="muted pad" data-i18n="stats.empty">No statistics yet.</p></div>
+                </div>
+
+            </section>
+        </main>
+
+    </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
