@@ -8,6 +8,8 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 
+#include "logo.h"
+
 // =====================================================
 // DEVICE
 // =====================================================
@@ -24,10 +26,6 @@
 
 Adafruit_ST7735 tft(TFT_CS, TFT_DC, TFT_RST);
 
-// Logical display size after rotation:
-// WIDTH  = 160
-// HEIGHT = 128
-
 // =====================================================
 // KEYPAD 4x4
 // =====================================================
@@ -43,17 +41,11 @@ Adafruit_ST7735 tft(TFT_CS, TFT_DC, TFT_RST);
 #define COL4 32
 
 const uint8_t rowPins[4] = {
-    ROW1,
-    ROW2,
-    ROW3,
-    ROW4
+    ROW1, ROW2, ROW3, ROW4
 };
 
 const uint8_t colPins[4] = {
-    COL1,
-    COL2,
-    COL3,
-    COL4
+    COL1, COL2, COL3, COL4
 };
 
 const char keyMap[4][4] = {
@@ -64,21 +56,105 @@ const char keyMap[4][4] = {
 };
 
 // =====================================================
-// STUDENT ID
+// STATE MACHINE (Kahoot-style)
+// =====================================================
+//
+// LOGO          -> idle: HCMUTE logo, waiting for a session
+// LOBBY         -> session pushed: enter ID (open-ended)
+// REGISTERING   -> waiting for REGISTER_ACK
+// JOINED        -> in, waiting for the teacher to start
+// WAIT_QUESTION -> quiz running, waiting for a question
+// QUESTION      -> question on screen, A-D to answer
+// ANSWER_SENT   -> choice highlighted, waiting for ACK
+// RESULT        -> quiz over, showing score
+
+enum DeviceState {
+    STATE_LOGO,
+    STATE_LOBBY,
+    STATE_REGISTERING,
+    STATE_JOINED,
+    STATE_WAIT_QUESTION,
+    STATE_QUESTION,
+    STATE_ANSWER_SENT,
+    STATE_RESULT
+};
+
+volatile DeviceState state = STATE_LOGO;
+
+// =====================================================
+// DATA
 // =====================================================
 
 String studentID = "";
 
-const size_t MAX_ID_LENGTH = 10;
+const size_t MAX_ID_LENGTH = 12;
 
-// =====================================================
-// CURRENT QUESTION
-// =====================================================
+// Session info from QUIZ_INFO.
 
-// Question ID received from Raspberry Pi.
-// Example: Q01, Q02, Q03...
+String quizTitle = "";
+int quizTotal = 0;
+int quizTimeLimitSec = 0;
+int quizExpected = 0;
+String idPrefix = "";
+int idLength = 0;
+
+// Current question.
 
 String currentQuestionID = "";
+int currentQuestionNumber = 0;
+int questionTotal = 0;
+String qText = "";
+String qA = "";
+String qB = "";
+String qC = "";
+String qD = "";
+
+// Whole-quiz countdown.
+
+unsigned long quizDeadline = 0;
+bool quizDeadlineSet = false;
+bool quizRunning = false;
+bool quizEnded = false;
+unsigned long lastClockPaint = 0;
+
+// Lobby entry window (open until the teacher starts).
+
+bool entryOpen = false;
+
+// Score tracking (correct answers come from ANSWER_ACK).
+
+int answeredCount = 0;
+int correctCount = 0;
+
+// Timeouts for missing ACKs.
+
+unsigned long registerSentAt = 0;
+unsigned long answerSentAt = 0;
+
+volatile bool gatewayConnected = false;
+
+// =====================================================
+// PENDING BLE EVENTS
+// =====================================================
+
+volatile bool pendingQuestion = false;
+volatile bool pendingAck = false;
+volatile bool pendingQuizInfo = false;
+volatile bool pendingQuizEnd = false;
+
+String ackType = "";
+String ackStatus = "";
+String ackReason = "";
+bool ackCorrect = false;
+
+String newQuizTitle = "";
+int newQuizTotal = 0;
+int newQuizTimeLimit = 0;
+bool newQuizRunning = false;
+bool newQuizLobby = false;
+int newQuizExpected = 0;
+String newQuizPrefix = "";
+int newQuizIdLength = 0;
 
 // =====================================================
 // BLE UUID
@@ -113,6 +189,112 @@ BLECharacteristic* ackCharacteristic = nullptr;
 volatile bool deviceConnected = false;
 
 // =====================================================
+// JSON FIELD HELPERS
+// =====================================================
+
+String jsonGetString(
+    const String& packet,
+    const char* key
+)
+{
+    String pattern = "\"" + String(key) + "\":\"";
+
+    int start = packet.indexOf(pattern);
+
+    if (start < 0)
+    {
+        return "";
+    }
+
+    start += pattern.length();
+
+    int end = packet.indexOf("\"", start);
+
+    if (end <= start)
+    {
+        return "";
+    }
+
+    return packet.substring(start, end);
+}
+
+long jsonGetInt(
+    const String& packet,
+    const char* key
+)
+{
+    String pattern = "\"" + String(key) + "\":";
+
+    int start = packet.indexOf(pattern);
+
+    if (start < 0)
+    {
+        return 0;
+    }
+
+    start += pattern.length();
+
+    int end = start;
+
+    while (end < (int)packet.length())
+    {
+        char c = packet.charAt(end);
+
+        if (c < '0' || c > '9')
+        {
+            break;
+        }
+
+        end++;
+    }
+
+    if (end == start)
+    {
+        return 0;
+    }
+
+    return packet.substring(start, end).toInt();
+}
+
+// =====================================================
+// LAYOUT
+// =====================================================
+
+// Quiz clock: top-right corner (x 118..160, y 4..16).
+
+#define CLOCK_X 118
+#define CLOCK_Y 4
+#define CLOCK_W 42
+#define CLOCK_H 12
+
+// Option row Y positions on the question screen.
+
+const int optionY[4] = {68, 82, 96, 110};
+
+// =====================================================
+// FORWARD DECLARATIONS
+// =====================================================
+
+void showResultScreen();
+void drawQuizClock(bool force = false);
+void drawGatewayFooter();
+void displayLogoIdle();
+void drawSignalIcon();
+void displayLobbyEntry();
+void displayStudentID();
+void displayJoined();
+void displayQuizStarting();
+void displayMessage(
+    const char* title,
+    uint16_t titleColor,
+    const String& line1,
+    const String& line2
+);
+void displayWaitQuestion();
+void drawQuestionScreen();
+void highlightOption(char choice);
+
+// =====================================================
 // BLE SERVER CALLBACK
 // =====================================================
 
@@ -122,20 +304,20 @@ class ServerCallbacks : public BLEServerCallbacks
     {
         deviceConnected = true;
 
-        Serial.println();
-        Serial.println("================================");
         Serial.println("BLE GATEWAY CONNECTED");
-        Serial.println("================================");
     }
 
     void onDisconnect(BLEServer* server) override
     {
         deviceConnected = false;
+        gatewayConnected = false;
 
-        Serial.println();
-        Serial.println("================================");
+        if (state == STATE_LOGO)
+        {
+            drawSignalIcon();
+        }
+
         Serial.println("BLE GATEWAY DISCONNECTED");
-        Serial.println("================================");
 
         delay(100);
 
@@ -146,8 +328,7 @@ class ServerCallbacks : public BLEServerCallbacks
 };
 
 // =====================================================
-// ACK CALLBACK
-// Raspberry Pi -> ESP32
+// ACK / QUIZ_INFO / QUIZ_END CALLBACK
 // =====================================================
 
 class ACKCallbacks : public BLECharacteristicCallbacks
@@ -158,41 +339,45 @@ class ACKCallbacks : public BLECharacteristicCallbacks
 
         Serial.println();
         Serial.println("========== BLE RX ==========");
-        Serial.print("ACK: ");
         Serial.println(value);
         Serial.println("============================");
 
-        // -------------------------------------------------
-        // 160x128 LANDSCAPE UI
-        // -------------------------------------------------
+        String type = jsonGetString(value, "type");
 
-        tft.fillScreen(ST77XX_BLACK);
+        if (type == "QUIZ_INFO")
+        {
+            newQuizTitle = jsonGetString(value, "title");
+            newQuizTotal = jsonGetInt(value, "total");
+            newQuizTimeLimit = jsonGetInt(value, "time_limit");
+            newQuizExpected = jsonGetInt(value, "expected");
+            newQuizPrefix = jsonGetString(value, "prefix");
+            newQuizIdLength = jsonGetInt(value, "id_length");
 
-        tft.setTextColor(ST77XX_GREEN);
-        tft.setTextSize(2);
-        tft.setCursor(25, 10);
-        tft.println("REGISTERED");
+            String st = jsonGetString(value, "status");
+            newQuizRunning = (st == "running");
+            newQuizLobby = (st == "lobby");
 
-        tft.setTextColor(ST77XX_WHITE);
-        tft.setTextSize(1);
-        tft.setCursor(10, 45);
-        tft.println("Student ID:");
+            pendingQuizInfo = true;
+        }
+        else if (type == "QUIZ_END")
+        {
+            pendingQuizEnd = true;
+        }
+        else
+        {
+            ackType = type;
+            ackStatus = jsonGetString(value, "status");
+            ackReason = jsonGetString(value, "reason");
+            ackCorrect =
+                jsonGetString(value, "correct") == "true";
 
-        tft.setTextColor(ST77XX_YELLOW);
-        tft.setTextSize(2);
-        tft.setCursor(10, 60);
-        tft.println(studentID);
-
-        tft.setTextColor(ST77XX_CYAN);
-        tft.setTextSize(1);
-        tft.setCursor(68, 105);
-        tft.println("READY");
+            pendingAck = true;
+        }
     }
 };
 
 // =====================================================
 // QUESTION CALLBACK
-// Raspberry Pi -> ESP32
 // =====================================================
 
 class QuestionCallbacks : public BLECharacteristicCallbacks
@@ -206,234 +391,39 @@ class QuestionCallbacks : public BLECharacteristicCallbacks
         Serial.println(packet);
         Serial.println("==============================");
 
-        // -------------------------------------------------
-        // Extract question_id
-        // -------------------------------------------------
+        currentQuestionID =
+            jsonGetString(packet, "question_id");
 
-        int idStart = packet.indexOf("\"question_id\":\"");
+        long number = jsonGetInt(packet, "number");
+        long total = jsonGetInt(packet, "total");
 
-        if (idStart >= 0)
+        if (number > 0)
         {
-            idStart += strlen("\"question_id\":\"");
-
-            int idEnd = packet.indexOf("\"", idStart);
-
-            if (idEnd > idStart)
-            {
-                currentQuestionID = packet.substring(
-                    idStart,
-                    idEnd
-                );
-
-                Serial.print("Current Question ID: ");
-                Serial.println(currentQuestionID);
-            }
+            currentQuestionNumber = (int)number;
+        }
+        else if (currentQuestionID.length() > 0)
+        {
+            currentQuestionNumber =
+                currentQuestionID.substring(1).toInt();
         }
 
-        // -------------------------------------------------
-        // Extract question text
-        // -------------------------------------------------
-
-        String questionText = "";
-
-        int questionStart =
-            packet.indexOf("\"question\":\"");
-
-        if (questionStart >= 0)
+        if (total > 0)
         {
-            questionStart += strlen("\"question\":\"");
-
-            int questionEnd =
-                packet.indexOf("\"", questionStart);
-
-            if (questionEnd > questionStart)
-            {
-                questionText =
-                    packet.substring(
-                        questionStart,
-                        questionEnd
-                    );
-            }
+            questionTotal = (int)total;
         }
 
-        // -------------------------------------------------
-        // Extract options
-        // -------------------------------------------------
+        qText = jsonGetString(packet, "question");
+        qA = jsonGetString(packet, "A");
+        qB = jsonGetString(packet, "B");
+        qC = jsonGetString(packet, "C");
+        qD = jsonGetString(packet, "D");
 
-        String optionA = "";
-        String optionB = "";
-        String optionC = "";
-        String optionD = "";
-
-        int posA = packet.indexOf("\"A\":\"");
-
-        if (posA >= 0)
+        if (currentQuestionID.length() == 0)
         {
-            posA += strlen("\"A\":\"");
-
-            int endA = packet.indexOf("\"", posA);
-
-            if (endA > posA)
-                optionA = packet.substring(posA, endA);
+            return;
         }
 
-        int posB = packet.indexOf("\"B\":\"");
-
-        if (posB >= 0)
-        {
-            posB += strlen("\"B\":\"");
-
-            int endB = packet.indexOf("\"", posB);
-
-            if (endB > posB)
-                optionB = packet.substring(posB, endB);
-        }
-
-        int posC = packet.indexOf("\"C\":\"");
-
-        if (posC >= 0)
-        {
-            posC += strlen("\"C\":\"");
-
-            int endC = packet.indexOf("\"", posC);
-
-            if (endC > posC)
-                optionC = packet.substring(posC, endC);
-        }
-
-        int posD = packet.indexOf("\"D\":\"");
-
-        if (posD >= 0)
-        {
-            posD += strlen("\"D\":\"");
-
-            int endD = packet.indexOf("\"", posD);
-
-            if (endD > posD)
-                optionD = packet.substring(posD, endD);
-        }
-
-        // -------------------------------------------------
-        // Serial debug
-        // -------------------------------------------------
-
-        Serial.println("------ PARSED QUESTION ------");
-
-        Serial.print("Question ID: ");
-        Serial.println(currentQuestionID);
-
-        Serial.print("Question: ");
-        Serial.println(questionText);
-
-        Serial.print("A: ");
-        Serial.println(optionA);
-
-        Serial.print("B: ");
-        Serial.println(optionB);
-
-        Serial.print("C: ");
-        Serial.println(optionC);
-
-        Serial.print("D: ");
-        Serial.println(optionD);
-
-        Serial.println("-----------------------------");
-
-        // -------------------------------------------------
-        // DISPLAY
-        // 160 x 128 LANDSCAPE
-        // -------------------------------------------------
-
-        tft.fillScreen(ST77XX_BLACK);
-
-        // -------------------------------------------------
-        // Header
-        // -------------------------------------------------
-
-        tft.setTextColor(ST77XX_CYAN);
-        tft.setTextSize(1);
-
-        tft.setCursor(5, 5);
-        tft.print("QUESTION ");
-
-        tft.setTextColor(ST77XX_YELLOW);
-        tft.print(currentQuestionID);
-
-        // -------------------------------------------------
-        // Question text
-        // -------------------------------------------------
-
-        tft.setTextColor(ST77XX_WHITE);
-        tft.setTextSize(1);
-
-        int x = 5;
-        int y = 20;
-
-        const int maxCharsPerLine = 26;
-
-        String remaining = questionText;
-
-        while (remaining.length() > 0 && y < 65)
-        {
-            int lineLength = maxCharsPerLine;
-
-            if (remaining.length() < lineLength)
-            {
-                lineLength = remaining.length();
-            }
-
-            // -------------------------------------------------
-            // Don't split a word if possible.
-            // -------------------------------------------------
-
-            if (lineLength < remaining.length())
-            {
-                int spacePos =
-                    remaining.lastIndexOf(' ', lineLength);
-
-                if (spacePos > 0)
-                {
-                    lineLength = spacePos;
-                }
-            }
-
-            String line =
-                remaining.substring(0, lineLength);
-
-            line.trim();
-
-            tft.setCursor(x, y);
-            tft.println(line);
-
-            remaining =
-                remaining.substring(lineLength);
-
-            remaining.trim();
-
-            y += 10;
-        }
-
-        // -------------------------------------------------
-        // Options
-        // -------------------------------------------------
-
-        tft.setTextColor(ST77XX_GREEN);
-
-        tft.setCursor(5, 70);
-        tft.print("A. ");
-        tft.println(optionA);
-
-        tft.setCursor(5, 84);
-        tft.print("B. ");
-        tft.println(optionB);
-
-        tft.setCursor(5, 98);
-        tft.print("C. ");
-        tft.println(optionC);
-
-        tft.setCursor(5, 112);
-        tft.print("D. ");
-        tft.println(optionD);
+        pendingQuestion = true;
     }
 };
 
@@ -447,16 +437,10 @@ char readKeypad()
     {
         for (int i = 0; i < 4; i++)
         {
-            digitalWrite(
-                rowPins[i],
-                HIGH
-            );
+            digitalWrite(rowPins[i], HIGH);
         }
 
-        digitalWrite(
-            rowPins[row],
-            LOW
-        );
+        digitalWrite(rowPins[row], LOW);
 
         for (int col = 0; col < 4; col++)
         {
@@ -464,13 +448,11 @@ char readKeypad()
             {
                 delay(20);
 
-                // Confirm the key is still pressed.
                 if (digitalRead(colPins[col]) != LOW)
                 {
                     continue;
                 }
 
-                // Wait until release so one press = one key event.
                 while (digitalRead(colPins[col]) == LOW)
                 {
                     delay(1);
@@ -485,29 +467,306 @@ char readKeypad()
 }
 
 // =====================================================
-// DISPLAY STUDENT ID
+// TEXT WRAP HELPER
 // =====================================================
 
-void displayStudentID()
+void drawWrappedText(
+    const String& text,
+    int x,
+    int y,
+    int maxY,
+    int maxCharsPerLine
+)
 {
-    // 160x128 landscape
-    // Clear full-width student ID area.
+    String remaining = text;
+
+    while (remaining.length() > 0 && y < maxY)
+    {
+        int lineLength = maxCharsPerLine;
+
+        if ((int)remaining.length() < lineLength)
+        {
+            lineLength = remaining.length();
+        }
+
+        if (lineLength < (int)remaining.length())
+        {
+            int spacePos =
+                remaining.lastIndexOf(' ', lineLength);
+
+            if (spacePos > 0)
+            {
+                lineLength = spacePos;
+            }
+        }
+
+        String line =
+            remaining.substring(0, lineLength);
+
+        line.trim();
+
+        tft.setCursor(x, y);
+        tft.println(line);
+
+        remaining = remaining.substring(lineLength);
+
+        remaining.trim();
+
+        y += 10;
+    }
+}
+
+// =====================================================
+// QUIZ CLOCK (top-right corner, every screen)
+// =====================================================
+
+int clockRemainingSec()
+{
+    if (!quizDeadlineSet)
+    {
+        return -1;
+    }
+
+    long remainingMs =
+        (long)quizDeadline - (long)millis();
+
+    return remainingMs > 0 ? (int)(remainingMs / 1000) : 0;
+}
+
+void drawQuizClock(bool force)
+{
+    if (!quizDeadlineSet)
+    {
+        return;
+    }
+
+    unsigned long now = millis();
+
+    if (!force && now - lastClockPaint < 250)
+    {
+        return;
+    }
+
+    lastClockPaint = now;
+
+    int remaining = clockRemainingSec();
+
+    char buf[8];
+
+    snprintf(
+        buf,
+        sizeof(buf),
+        "%02d:%02d",
+        remaining / 60,
+        remaining % 60
+    );
+
     tft.fillRect(
-        0,
-        42,
-        160,
-        38,
+        CLOCK_X,
+        CLOCK_Y,
+        CLOCK_W,
+        CLOCK_H,
         ST77XX_BLACK
     );
 
+    tft.setTextSize(1);
+
+    tft.setTextColor(
+        remaining <= 10 ? ST77XX_RED : ST77XX_YELLOW
+    );
+
+    tft.setCursor(CLOCK_X + 4, CLOCK_Y + 1);
+    tft.print(buf);
+
+    if (remaining <= 0 && !quizEnded)
+    {
+        showResultScreen();
+    }
+}
+
+// =====================================================
+// GATEWAY FOOTER
+// =====================================================
+
+void drawGatewayFooter()
+{
+    tft.fillRect(0, 118, 160, 10, ST77XX_BLACK);
+
+    tft.setTextSize(1);
+
+    tft.setTextColor(
+        gatewayConnected ? ST77XX_GREEN : ST77XX_RED
+    );
+
+    tft.setCursor(5, 119);
+
+    tft.print("Gateway: ");
+
+    tft.println(gatewayConnected ? "OK" : "...");
+}
+
+// =====================================================
+// SCREEN: LOGO IDLE (waiting for a session)
+// =====================================================
+
+// Signal icon, top-left corner: a broadcast dot with
+// sound-wave arcs. Black while the gateway is linked;
+// gray with a red diagonal slash while it is not.
+
+void drawBroadcastArcs(
+    int cx,
+    int cy,
+    int r,
+    uint16_t color
+)
+{
+    for (int side = -1; side <= 1; side += 2)
+    {
+        int px = 0;
+        int py = 0;
+
+        for (int a = -50; a <= 50; a += 5)
+        {
+            float rad = a * 3.14159f / 180.0f;
+
+            int x = cx + side *
+                (int)(r * cos(rad) + 0.5f);
+
+            int y = cy -
+                (int)(r * sin(rad) + 0.5f);
+
+            if (a > -50)
+            {
+                tft.drawLine(px, py, x, y, color);
+            }
+
+            px = x;
+            py = y;
+        }
+    }
+}
+
+void drawSignalIcon()
+{
+    // White patch behind the icon.
+    tft.fillRect(2, 2, 30, 22, ST77XX_WHITE);
+
+    int cx = 17;
+    int cy = 13;
+
+    uint16_t color =
+        gatewayConnected
+            ? ST77XX_BLACK
+            : 0xB596;  // light gray
+
+    tft.fillCircle(cx, cy, 3, color);
+
+    drawBroadcastArcs(cx, cy, 8, color);
+    drawBroadcastArcs(cx, cy, 7, color);
+    drawBroadcastArcs(cx, cy, 12, color);
+    drawBroadcastArcs(cx, cy, 11, color);
+
+    if (!gatewayConnected)
+    {
+        // Red slash, bottom-left to top-right.
+        tft.drawLine(5, 21, 29, 5, ST77XX_RED);
+        tft.drawLine(6, 21, 30, 5, ST77XX_RED);
+    }
+}
+
+void displayLogoIdle()
+{
+    // White background + purple HCMUTE logo.
+    tft.drawRGBBitmap(
+        0,
+        0,
+        LOGO_HCMUTE,
+        LOGO_WIDTH,
+        LOGO_HEIGHT
+    );
+
+    drawSignalIcon();
+
+    // "Waiting for teacher..." centered near the bottom.
+    tft.fillRect(0, 110, 160, 14, ST77XX_WHITE);
+
+    tft.setTextColor(ST77XX_BLACK);
+    tft.setTextSize(1);
+
+    const char* msg = "Waiting for teacher...";
+
+    int16_t x =
+        (160 - (int)strlen(msg) * 6) / 2;
+
+    tft.setCursor(x, 115);
+    tft.print(msg);
+
+    lastClockPaint = 0;
+}
+
+// =====================================================
+// SCREEN: LOBBY ENTRY (open-ended ID entry)
+// =====================================================
+
+void displayLobbyEntry()
+{
+    tft.fillScreen(ST77XX_BLACK);
+
+    // Quiz title (up to 2 lines).
+    tft.setTextColor(ST77XX_CYAN);
+    tft.setTextSize(1);
+
+    if (quizTitle.length() > 0)
+    {
+        drawWrappedText(quizTitle, 5, 4, 26, 19);
+    }
+
     tft.setTextColor(ST77XX_WHITE);
     tft.setTextSize(1);
-    tft.setCursor(10, 45);
-    tft.println("Student ID:");
+    tft.setCursor(5, 30);
+    tft.println("Enter Student ID:");
+
+    tft.fillRect(0, 42, 160, 20, ST77XX_BLACK);
+    tft.setTextColor(ST77XX_YELLOW);
+    tft.setTextSize(2);
+    tft.setCursor(10, 44);
+    tft.println(studentID);
+
+    tft.setTextColor(ST77XX_WHITE);
+    tft.setTextSize(1);
+
+    tft.setCursor(5, 70);
+    tft.print("* Clear   # Confirm");
+
+    if (quizTimeLimitSec > 0)
+    {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%02d:%02d",
+                 quizTimeLimitSec / 60,
+                 quizTimeLimitSec % 60);
+
+        tft.setCursor(5, 88);
+        tft.print("Quiz time: ");
+        tft.print(buf);
+    }
+
+    if (quizTotal > 0)
+    {
+        tft.setCursor(5, 100);
+        tft.print("Questions: ");
+        tft.print(quizTotal);
+    }
+
+    drawGatewayFooter();
+}
+
+void displayStudentID()
+{
+    tft.fillRect(0, 42, 160, 20, ST77XX_BLACK);
 
     tft.setTextColor(ST77XX_YELLOW);
     tft.setTextSize(2);
-    tft.setCursor(10, 58);
+    tft.setCursor(10, 44);
     tft.println(studentID);
 
     Serial.print("Student ID: ");
@@ -515,138 +774,309 @@ void displayStudentID()
 }
 
 // =====================================================
-// DISPLAY READY
+// SCREEN: JOINED / STARTING
 // =====================================================
 
-void displayReady()
+void displayJoined()
 {
     tft.fillScreen(ST77XX_BLACK);
 
-    // -------------------------------------------------
-    // Header
-    // -------------------------------------------------
-
     tft.setTextColor(ST77XX_GREEN);
     tft.setTextSize(2);
-    tft.setCursor(45, 8);
-    tft.println("PulseNet");
-
-    // -------------------------------------------------
-    // Student ID
-    // -------------------------------------------------
+    tft.setCursor(30, 14);
+    tft.println("JOINED!");
 
     tft.setTextColor(ST77XX_WHITE);
     tft.setTextSize(1);
-    tft.setCursor(10, 35);
-    tft.println("Enter Student ID:");
 
-    displayStudentID();
+    tft.setCursor(10, 44);
+    tft.print("ID: ");
 
-    // -------------------------------------------------
-    // Key instructions
-    // -------------------------------------------------
+    tft.setTextColor(ST77XX_YELLOW);
+    tft.println(studentID);
+
+    tft.setTextColor(ST77XX_WHITE);
+    tft.setCursor(10, 70);
+    tft.println("Waiting for the teacher");
+    tft.setCursor(10, 82);
+    tft.println("to start the quiz...");
+
+    drawGatewayFooter();
+}
+
+void displayQuizStarting()
+{
+    tft.fillScreen(ST77XX_BLACK);
 
     tft.setTextColor(ST77XX_CYAN);
+    tft.setTextSize(2);
+    tft.setCursor(25, 14);
+    tft.println("GET READY!");
+
+    tft.setTextColor(ST77XX_WHITE);
     tft.setTextSize(1);
 
-    tft.setCursor(10, 95);
-    tft.println("* = Clear");
+    tft.setCursor(10, 50);
+    tft.println("The quiz is starting...");
 
-    tft.setCursor(10, 110);
-    tft.println("# = Confirm");
+    tft.setCursor(10, 70);
+    tft.println("ID: ");
+
+    tft.setTextColor(ST77XX_YELLOW);
+    tft.println(studentID);
+
+    drawGatewayFooter();
 }
 
 // =====================================================
-// DISPLAY REGISTRATION STATUS
+// SCREEN: SIMPLE MESSAGE
 // =====================================================
 
-void displayRegistrationStatus(
-    const char* status
+void displayMessage(
+    const char* title,
+    uint16_t titleColor,
+    const String& line1,
+    const String& line2
 )
 {
     tft.fillScreen(ST77XX_BLACK);
 
-    // -------------------------------------------------
-    // Header
-    // -------------------------------------------------
-
-    tft.setTextColor(ST77XX_CYAN);
+    tft.setTextColor(titleColor);
     tft.setTextSize(2);
-    tft.setCursor(35, 12);
-    tft.println("REGISTER");
 
-    // -------------------------------------------------
-    // Student ID
-    // -------------------------------------------------
+    int16_t x = (160 - (int)strlen(title) * 12) / 2;
+
+    if (x < 0)
+    {
+        x = 5;
+    }
+
+    tft.setCursor(x, 14);
+    tft.println(title);
 
     tft.setTextColor(ST77XX_WHITE);
     tft.setTextSize(1);
+
+    if (line1.length() > 0)
+    {
+        drawWrappedText(line1, 10, 50, 84, 24);
+    }
+
+    if (line2.length() > 0)
+    {
+        drawWrappedText(line2, 10, 86, 114, 24);
+    }
+
+    drawGatewayFooter();
+}
+
+// =====================================================
+// SCREEN: WAIT FOR NEXT QUESTION
+// =====================================================
+
+void displayWaitQuestion()
+{
+    tft.fillScreen(ST77XX_BLACK);
+
+    tft.setTextColor(ST77XX_GREEN);
+    tft.setTextSize(2);
+    tft.setCursor(45, 16);
+    tft.println("READY");
+
+    tft.setTextColor(ST77XX_WHITE);
+    tft.setTextSize(1);
+
+    tft.setCursor(10, 42);
+    tft.print("ID: ");
+
+    tft.setTextColor(ST77XX_YELLOW);
+    tft.println(studentID);
+
+    tft.setTextColor(ST77XX_WHITE);
+    tft.setCursor(10, 58);
+    tft.print("Answered: ");
+    tft.println(answeredCount);
+
+    tft.setCursor(10, 74);
+
+    if (questionTotal > 0 &&
+        answeredCount >= questionTotal)
+    {
+        tft.println("All questions answered.");
+        tft.setCursor(10, 88);
+        tft.println("Waiting for the quiz to end...");
+    }
+    else
+    {
+        tft.println("Waiting for next question...");
+    }
+
+    drawGatewayFooter();
+}
+
+// =====================================================
+// SCREEN: QUESTION
+// =====================================================
+
+void drawQuestionScreen()
+{
+    tft.fillScreen(ST77XX_BLACK);
+
+    tft.setTextColor(ST77XX_CYAN);
+    tft.setTextSize(1);
+    tft.setCursor(5, 5);
+    tft.print("Question ");
+
+    tft.setTextColor(ST77XX_YELLOW);
+
+    if (questionTotal > 0)
+    {
+        tft.print(currentQuestionNumber);
+        tft.print("/");
+        tft.print(questionTotal);
+    }
+    else
+    {
+        tft.print(currentQuestionID);
+    }
+
+    tft.setTextColor(ST77XX_WHITE);
+    tft.setTextSize(1);
+    drawWrappedText(qText, 5, 20, 64, 26);
+
+    const String options[4] = {qA, qB, qC, qD};
+
+    for (int i = 0; i < 4; i++)
+    {
+        tft.setTextColor(ST77XX_WHITE);
+        tft.setCursor(5, optionY[i]);
+        tft.print((char)('A' + i));
+        tft.print(". ");
+        tft.println(options[i]);
+    }
+
+    lastClockPaint = 0;
+}
+
+void highlightOption(char choice)
+{
+    int index = choice - 'A';
+
+    if (index < 0 || index > 3)
+    {
+        return;
+    }
+
+    const String options[4] = {qA, qB, qC, qD};
+
+    tft.fillRect(
+        0,
+        optionY[index] - 2,
+        160,
+        14,
+        ST77XX_BLUE
+    );
+
+    tft.setTextColor(ST77XX_WHITE);
+    tft.setTextSize(1);
+    tft.setCursor(5, optionY[index]);
+
+    tft.print((char)('A' + index));
+    tft.print(". ");
+    tft.println(options[index]);
+
+    tft.fillRect(0, 124, 160, 4, ST77XX_BLACK);
+
+    tft.setTextColor(ST77XX_CYAN);
+    tft.setTextSize(1);
+    tft.setCursor(5, 124);
+    tft.print("Sending...");
+}
+
+// =====================================================
+// SCREEN: RESULT
+// =====================================================
+
+void showResultScreen()
+{
+    quizEnded = true;
+    entryOpen = false;
+    state = STATE_RESULT;
+
+    tft.fillScreen(ST77XX_BLACK);
+
+    tft.setTextColor(ST77XX_CYAN);
+    tft.setTextSize(2);
+    tft.setCursor(22, 12);
+    tft.println("QUIZ ENDED");
+
+    int total = questionTotal > 0 ? questionTotal : quizTotal;
+
+    tft.setTextColor(ST77XX_WHITE);
+    tft.setTextSize(1);
+
     tft.setCursor(10, 45);
-    tft.println("Student ID:");
+    tft.print("Correct: ");
+
+    tft.setTextColor(ST77XX_GREEN);
+    tft.print(correctCount);
+
+    tft.setTextColor(ST77XX_WHITE);
+    tft.print(" / ");
+    tft.print(total);
+
+    float score =
+        total > 0
+            ? (float)correctCount * 10.0f / (float)total
+            : 0.0f;
+
+    tft.setTextColor(ST77XX_WHITE);
+    tft.setCursor(10, 65);
+    tft.print("Score: ");
 
     tft.setTextColor(ST77XX_YELLOW);
     tft.setTextSize(2);
-    tft.setCursor(10, 60);
-    tft.println(studentID);
+    tft.setCursor(10, 80);
 
-    // -------------------------------------------------
-    // Status
-    // -------------------------------------------------
+    char buf[12];
 
-    tft.setTextColor(ST77XX_GREEN);
+    snprintf(buf, sizeof(buf), "%.1f/10", score);
+
+    tft.println(buf);
+
+    tft.setTextColor(ST77XX_WHITE);
     tft.setTextSize(1);
-    tft.setCursor(10, 100);
-    tft.println(status);
+    tft.setCursor(10, 108);
+    tft.println("See the teacher's screen.");
+
+    Serial.print("RESULT: correct=");
+    Serial.print(correctCount);
+    Serial.print("/");
+    Serial.print(total);
+    Serial.print(" score=");
+    Serial.println(buf);
 }
 
 // =====================================================
 // SEND REGISTRATION
-// ESP32 -> Raspberry Pi
 // =====================================================
 
 bool sendRegistration()
 {
-    Serial.println();
-    Serial.println("========== REGISTRATION ==========");
-    Serial.print("BLE connected: ");
-    Serial.println(
-        deviceConnected ? "YES" : "NO"
-    );
-
     if (!deviceConnected)
     {
-        Serial.println(
-            "ERROR: Raspberry Pi is not connected."
-        );
-
-        Serial.println(
-            "Registration cannot be sent."
-        );
-
-        displayRegistrationStatus(
-            "BLE NOT CONNECTED"
-        );
-
-        return false;
-    }
-
-    if (registrationCharacteristic == nullptr)
-    {
-        Serial.println(
-            "ERROR: Registration characteristic is NULL."
-        );
-
-        displayRegistrationStatus(
-            "BLE ERROR"
+        displayMessage(
+            "BLE ERROR",
+            ST77XX_RED,
+            "Gateway not connected.",
+            ""
         );
 
         return false;
     }
 
     String macAddress =
-        BLEDevice::getAddress()
-            .toString()
-            .c_str();
+        BLEDevice::getAddress().toString().c_str();
 
     String packet =
         "{\"type\":\"REGISTER\","
@@ -658,78 +1088,27 @@ bool sendRegistration()
         macAddress +
         "\"}";
 
-    Serial.println(
-        "Sending registration packet:"
-    );
-
+    Serial.print("TX: ");
     Serial.println(packet);
 
-    registrationCharacteristic->setValue(
-        packet.c_str()
-    );
-
+    registrationCharacteristic->setValue(packet.c_str());
     registrationCharacteristic->notify();
 
-    Serial.println(
-        "Registration notify sent."
-    );
-
-    Serial.println(
-        "=================================="
-    );
-
-    displayRegistrationStatus(
-        "SENT TO GATEWAY"
-    );
+    registerSentAt = millis();
 
     return true;
 }
 
 // =====================================================
 // SEND ANSWER
-// ESP32 -> Raspberry Pi
 // =====================================================
 
 bool sendAnswer(char answer)
 {
-    if (!deviceConnected)
+    if (!deviceConnected || currentQuestionID.length() == 0)
     {
-        Serial.println(
-            "ERROR: BLE gateway not connected."
-        );
-
         return false;
     }
-
-    if (answerCharacteristic == nullptr)
-    {
-        Serial.println(
-            "ERROR: Answer characteristic is NULL."
-        );
-
-        return false;
-    }
-
-    // -------------------------------------------------
-    // Make sure a question has been received
-    // -------------------------------------------------
-
-    if (currentQuestionID.length() == 0)
-    {
-        Serial.println(
-            "ERROR: No current question."
-        );
-
-        Serial.println(
-            "Cannot send answer."
-        );
-
-        return false;
-    }
-
-    // -------------------------------------------------
-    // Build ANSWER packet
-    // -------------------------------------------------
 
     String packet =
         "{\"type\":\"ANSWER\","
@@ -743,19 +1122,272 @@ bool sendAnswer(char answer)
         String(answer) +
         "\"}";
 
-    Serial.println();
-    Serial.println("========== BLE TX ==========");
-    Serial.println("Answer packet:");
+    Serial.print("TX: ");
     Serial.println(packet);
-    Serial.println("============================");
 
-    answerCharacteristic->setValue(
-        packet.c_str()
-    );
-
+    answerCharacteristic->setValue(packet.c_str());
     answerCharacteristic->notify();
 
+    answerSentAt = millis();
+
     return true;
+}
+
+// =====================================================
+// HANDLE QUIZ INFO (session lifecycle)
+// =====================================================
+
+void handleQuizInfo()
+{
+    Serial.print("QUIZ_INFO: ");
+    Serial.print(newQuizTitle);
+    Serial.print(" status=");
+    Serial.print(
+        newQuizLobby ? "lobby"
+                     : (newQuizRunning ? "running" : "draft")
+    );
+    Serial.print(" time=");
+    Serial.print(newQuizTimeLimit);
+    Serial.print(" total=");
+    Serial.print(newQuizTotal);
+    Serial.print(" expected=");
+    Serial.println(newQuizExpected);
+
+    quizTitle = newQuizTitle;
+    quizTotal = newQuizTotal;
+    quizTimeLimitSec = newQuizTimeLimit;
+    quizExpected = newQuizExpected;
+    idPrefix = newQuizPrefix;
+    idLength = newQuizIdLength;
+
+    if (questionTotal == 0 && quizTotal > 0)
+    {
+        questionTotal = quizTotal;
+    }
+
+    // -------------------------------------------------
+    // LOBBY: session pushed, students enter IDs
+    // -------------------------------------------------
+
+    if (newQuizLobby)
+    {
+        // Already joined? Keep the joined screen.
+        if (state == STATE_JOINED ||
+            state == STATE_REGISTERING)
+        {
+            return;
+        }
+
+        studentID = "";
+        entryOpen = true;
+
+        state = STATE_LOBBY;
+
+        displayLobbyEntry();
+
+        return;
+    }
+
+    // -------------------------------------------------
+    // RUNNING: the teacher started the quiz
+    // -------------------------------------------------
+
+    if (newQuizRunning)
+    {
+        bool alreadyRunning = quizRunning;
+
+        quizRunning = true;
+        quizEnded = false;
+
+        if (!alreadyRunning)
+        {
+            answeredCount = 0;
+            correctCount = 0;
+        }
+
+        if (!quizDeadlineSet || !alreadyRunning)
+        {
+            if (quizTimeLimitSec > 0)
+            {
+                quizDeadline =
+                    millis() +
+                    (unsigned long)quizTimeLimitSec * 1000UL;
+
+                quizDeadlineSet = true;
+            }
+        }
+
+        entryOpen = false;
+
+        if (state == STATE_LOGO ||
+            state == STATE_LOBBY ||
+            state == STATE_JOINED ||
+            state == STATE_RESULT)
+        {
+            state = STATE_WAIT_QUESTION;
+
+            displayQuizStarting();
+        }
+
+        return;
+    }
+
+    // -------------------------------------------------
+    // DRAFT: no active session (or lobby cancelled)
+    // -------------------------------------------------
+
+    quizRunning = false;
+    quizDeadlineSet = false;
+    quizEnded = false;
+    entryOpen = false;
+    answeredCount = 0;
+    correctCount = 0;
+    questionTotal = 0;
+
+    studentID = "";
+
+    state = STATE_LOGO;
+
+    displayLogoIdle();
+}
+
+// =====================================================
+// HANDLE ACK
+// =====================================================
+
+void handleAck()
+{
+    Serial.print("ACK type=");
+    Serial.print(ackType);
+    Serial.print(" status=");
+    Serial.println(ackStatus);
+
+    // ----- Gateway greeting -----
+
+    if (ackType == "ACK" && ackStatus == "CONNECTED")
+    {
+        gatewayConnected = true;
+
+        if (state == STATE_LOGO)
+        {
+            // White idle screen: just repaint the signal icon.
+            drawSignalIcon();
+        }
+        else if (state == STATE_LOBBY)
+        {
+            displayLobbyEntry();
+        }
+        else if (state == STATE_JOINED)
+        {
+            displayJoined();
+        }
+
+        return;
+    }
+
+    // ----- REGISTER_ACK -----
+
+    if (ackType == "REGISTER_ACK")
+    {
+        if (state != STATE_REGISTERING)
+        {
+            return;
+        }
+
+        if (ackStatus == "ACCEPTED")
+        {
+            state = STATE_JOINED;
+
+            displayJoined();
+        }
+        else
+        {
+            String reason =
+                ackReason.length() > 0
+                    ? ackReason
+                    : "UNKNOWN";
+
+            displayMessage(
+                "REJECTED",
+                ST77XX_RED,
+                "Registration failed:",
+                reason
+            );
+
+            delay(2000);
+
+            // Let the student try again (entry stays open
+            // until the teacher starts the quiz).
+            if (state == STATE_REGISTERING)
+            {
+                state = STATE_LOBBY;
+
+                displayLobbyEntry();
+            }
+        }
+
+        return;
+    }
+
+    // ----- ANSWER_ACK -----
+
+    if (ackType == "ANSWER_ACK")
+    {
+        if (state != STATE_ANSWER_SENT)
+        {
+            return;
+        }
+
+        if (ackStatus == "ACCEPTED")
+        {
+            answeredCount++;
+
+            if (ackCorrect)
+            {
+                correctCount++;
+            }
+
+            state = STATE_WAIT_QUESTION;
+
+            if (questionTotal > 0 &&
+                answeredCount >= questionTotal)
+            {
+                displayWaitQuestion();
+            }
+            else
+            {
+                displayMessage(
+                    "SENT",
+                    ST77XX_CYAN,
+                    "Answer recorded.",
+                    "Loading next question..."
+                );
+            }
+        }
+        else
+        {
+            String reason =
+                ackReason.length() > 0
+                    ? ackReason
+                    : "INVALID";
+
+            displayMessage(
+                "REJECTED",
+                ST77XX_RED,
+                "Answer rejected:",
+                reason
+            );
+
+            delay(2000);
+
+            drawQuestionScreen();
+            drawQuizClock(true);
+
+            state = STATE_QUESTION;
+        }
+
+        return;
+    }
 }
 
 // =====================================================
@@ -767,14 +1399,10 @@ void setupBLE()
     Serial.println();
     Serial.println("Starting BLE...");
 
-    BLEDevice::init(
-        DEVICE_NAME
-    );
+    BLEDevice::init(DEVICE_NAME);
 
     String macAddress =
-        BLEDevice::getAddress()
-            .toString()
-            .c_str();
+        BLEDevice::getAddress().toString().c_str();
 
     Serial.print("Device Name : ");
     Serial.println(DEVICE_NAME);
@@ -782,22 +1410,14 @@ void setupBLE()
     Serial.print("BLE MAC     : ");
     Serial.println(macAddress);
 
-    bleServer =
-        BLEDevice::createServer();
+    bleServer = BLEDevice::createServer();
 
-    bleServer->setCallbacks(
-        new ServerCallbacks()
-    );
+    bleServer->setCallbacks(new ServerCallbacks());
 
     BLEService* service =
         bleServer->createService(
             PULSENET_SERVICE_UUID
         );
-
-    // -------------------------------------------------
-    // ESP32 -> Pi
-    // Registration
-    // -------------------------------------------------
 
     registrationCharacteristic =
         service->createCharacteristic(
@@ -810,11 +1430,6 @@ void setupBLE()
         new BLE2902()
     );
 
-    // -------------------------------------------------
-    // Pi -> ESP32
-    // Question
-    // -------------------------------------------------
-
     questionCharacteristic =
         service->createCharacteristic(
             QUESTION_CHAR_UUID,
@@ -825,11 +1440,6 @@ void setupBLE()
     questionCharacteristic->setCallbacks(
         new QuestionCallbacks()
     );
-
-    // -------------------------------------------------
-    // ESP32 -> Pi
-    // Answer
-    // -------------------------------------------------
 
     answerCharacteristic =
         service->createCharacteristic(
@@ -842,11 +1452,6 @@ void setupBLE()
         new BLE2902()
     );
 
-    // -------------------------------------------------
-    // Pi -> ESP32
-    // ACK
-    // -------------------------------------------------
-
     ackCharacteristic =
         service->createCharacteristic(
             ACK_CHAR_UUID,
@@ -858,10 +1463,6 @@ void setupBLE()
         new ACKCallbacks()
     );
 
-    // -------------------------------------------------
-    // Start BLE service
-    // -------------------------------------------------
-
     service->start();
 
     BLEAdvertising* advertising =
@@ -871,29 +1472,14 @@ void setupBLE()
         PULSENET_SERVICE_UUID
     );
 
-    advertising->setScanResponse(
-        true
-    );
+    advertising->setScanResponse(true);
 
-    advertising->setMinPreferred(
-        0x06
-    );
-
-    advertising->setMinPreferred(
-        0x12
-    );
+    advertising->setMinPreferred(0x06);
+    advertising->setMinPreferred(0x12);
 
     BLEDevice::startAdvertising();
 
-    Serial.println(
-        "BLE initialized."
-    );
-
-    Serial.println(
-        "Advertising started."
-    );
-
-    Serial.println();
+    Serial.println("BLE initialized. Advertising started.");
 }
 
 // =====================================================
@@ -907,48 +1493,12 @@ void setup()
     delay(1000);
 
     Serial.println();
-    Serial.println(
-        "================================"
-    );
+    Serial.println("PulseNet Student Device");
+    Serial.println("ESP32 + ST7735S 160x128 + Keypad + BLE");
 
-    Serial.println(
-        "PulseNet Student Device"
-    );
-
-    Serial.println(
-        "ESP32 + ST7735S 160x128 + Keypad + BLE"
-    );
-
-    Serial.println(
-        "================================"
-    );
-
-    // -------------------------------------------------
-    // TFT
-    // -------------------------------------------------
-
-    Serial.println(
-        "Starting ST7735S 160x128 landscape..."
-    );
-
-    /*
-     * The physical ST7735 display is 128x160.
-     *
-     * Rotation 1 changes the logical orientation to:
-     *
-     * WIDTH  = 160
-     * HEIGHT = 128
-     */
-
-    tft.initR(
-        INITR_BLACKTAB
-    );
-
+    tft.initR(INITR_BLACKTAB);
     tft.setRotation(1);
-
-    tft.fillScreen(
-        ST77XX_BLACK
-    );
+    tft.fillScreen(ST77XX_BLACK);
 
     Serial.print("TFT width  : ");
     Serial.println(tft.width());
@@ -956,58 +1506,22 @@ void setup()
     Serial.print("TFT height : ");
     Serial.println(tft.height());
 
-    Serial.println(
-        "TFT initialized in landscape mode"
-    );
-
-    // -------------------------------------------------
-    // Keypad
-    // -------------------------------------------------
-
     for (int i = 0; i < 4; i++)
     {
-        pinMode(
-            rowPins[i],
-            OUTPUT
-        );
-
-        digitalWrite(
-            rowPins[i],
-            HIGH
-        );
+        pinMode(rowPins[i], OUTPUT);
+        digitalWrite(rowPins[i], HIGH);
     }
 
     for (int i = 0; i < 4; i++)
     {
-        pinMode(
-            colPins[i],
-            INPUT_PULLUP
-        );
+        pinMode(colPins[i], INPUT_PULLUP);
     }
-
-    Serial.println(
-        "Keypad initialized"
-    );
-
-    // -------------------------------------------------
-    // BLE
-    // -------------------------------------------------
 
     setupBLE();
 
-    // -------------------------------------------------
-    // Start screen
-    // -------------------------------------------------
+    displayLogoIdle();
 
-    displayReady();
-
-    Serial.println(
-        "System ready."
-    );
-
-    Serial.println(
-        "Enter Student ID..."
-    );
+    Serial.println("System ready. Waiting for a quiz session...");
 }
 
 // =====================================================
@@ -1016,163 +1530,228 @@ void setup()
 
 void loop()
 {
+    // -------------------------------------------------
+    // 0. Advertising watchdog
+    //
+    // If the link died without an onDisconnect event
+    // (e.g. the gateway host rebooted mid-connection),
+    // the stack can sit silent and never advertise
+    // again. Restart advertising periodically while no
+    // central is connected so the gateway can always
+    // find us.
+    // -------------------------------------------------
+
+    static unsigned long lastAdvCheck = 0;
+
+    if (!deviceConnected &&
+        millis() - lastAdvCheck > 8000)
+    {
+        lastAdvCheck = millis();
+
+        if (bleServer->getConnectedCount() == 0)
+        {
+            BLEDevice::startAdvertising();
+        }
+    }
+
+    // -------------------------------------------------
+    // 1. Pending BLE events
+    // -------------------------------------------------
+
+    if (pendingQuizEnd)
+    {
+        pendingQuizEnd = false;
+
+        Serial.println("QUIZ_END received.");
+
+        if (!quizEnded)
+        {
+            showResultScreen();
+        }
+    }
+
+    if (pendingQuizInfo)
+    {
+        pendingQuizInfo = false;
+
+        handleQuizInfo();
+    }
+
+    if (pendingQuestion)
+    {
+        pendingQuestion = false;
+
+        if (quizEnded)
+        {
+            quizEnded = false;
+        }
+
+        Serial.print("New question: ");
+        Serial.println(currentQuestionID);
+
+        drawQuestionScreen();
+        drawQuizClock(true);
+
+        state = STATE_QUESTION;
+    }
+
+    if (pendingAck)
+    {
+        pendingAck = false;
+
+        handleAck();
+    }
+
+    // -------------------------------------------------
+    // 2. Clocks
+    // -------------------------------------------------
+
+    if (!quizEnded && quizDeadlineSet && state != STATE_RESULT)
+    {
+        drawQuizClock(false);
+    }
+
+    // -------------------------------------------------
+    // 3. Timeouts
+    // -------------------------------------------------
+
+    if (state == STATE_REGISTERING &&
+        millis() - registerSentAt > 6000)
+    {
+        displayMessage(
+            "NO REPLY",
+            ST77XX_RED,
+            "Gateway did not reply.",
+            ""
+        );
+
+        delay(1500);
+
+        // Entry stays open; let the student retry.
+        state = STATE_LOBBY;
+        displayLobbyEntry();
+    }
+
+    if (state == STATE_ANSWER_SENT &&
+        millis() - answerSentAt > 5000)
+    {
+        drawQuestionScreen();
+        drawQuizClock(true);
+
+        state = STATE_QUESTION;
+    }
+
+    // -------------------------------------------------
+    // 4. Keypad (state-aware)
+    // -------------------------------------------------
+
     char key = readKeypad();
 
     if (key != '\0')
     {
-        Serial.print(
-            "Key pressed: "
-        );
-
+        Serial.print("Key pressed: ");
         Serial.println(key);
 
-        // -------------------------------------------------
-        // NUMBER
-        // -------------------------------------------------
+        // ----- Lobby: enter student ID -----
 
-        if (
-            key >= '0' &&
-            key <= '9'
-        )
+        if (state == STATE_LOBBY)
         {
-            if (
-                studentID.length()
-                < MAX_ID_LENGTH
-            )
+            if (key >= '0' && key <= '9')
             {
-                studentID += key;
+                if (studentID.length() < MAX_ID_LENGTH)
+                {
+                    studentID += key;
+
+                    displayStudentID();
+                }
+            }
+            else if (key == '*')
+            {
+                studentID = "";
 
                 displayStudentID();
             }
-            else
+            else if (key == '#')
             {
-                Serial.println(
-                    "Student ID: maximum length reached."
-                );
+                if (studentID.length() == 0)
+                {
+                    displayMessage(
+                        "NO ID",
+                        ST77XX_RED,
+                        "Enter your student ID first.",
+                        ""
+                    );
+
+                    delay(1200);
+
+                    displayLobbyEntry();
+                }
+                else if (
+                    idPrefix.length() > 0 &&
+                    !studentID.startsWith(idPrefix)
+                )
+                {
+                    displayMessage(
+                        "WRONG ID",
+                        ST77XX_RED,
+                        "ID must start with:",
+                        idPrefix
+                    );
+
+                    delay(1500);
+
+                    displayLobbyEntry();
+                }
+                else if (
+                    idLength > 0 &&
+                    (int)studentID.length() != idLength
+                )
+                {
+                    displayMessage(
+                        "WRONG ID",
+                        ST77XX_RED,
+                        "ID must be exactly",
+                        String(idLength) + " digits"
+                    );
+
+                    delay(1500);
+
+                    displayLobbyEntry();
+                }
+                else if (sendRegistration())
+                {
+                    state = STATE_REGISTERING;
+
+                    displayMessage(
+                        "JOINING",
+                        ST77XX_CYAN,
+                        "Registering ID: " + studentID,
+                        ""
+                    );
+                }
             }
         }
 
-        // -------------------------------------------------
-        // CLEAR
-        // -------------------------------------------------
+        // ----- Question: answer -----
 
-        else if (key == '*')
+        else if (state == STATE_QUESTION)
         {
-            studentID = "";
-
-            displayStudentID();
-
-            Serial.println(
-                "Student ID cleared"
-            );
-        }
-
-        // -------------------------------------------------
-        // CONFIRM + SEND REGISTER
-        // -------------------------------------------------
-
-        else if (key == '#')
-        {
-            if (
-                studentID.length() == 0
-            )
+            if (key >= 'A' && key <= 'D')
             {
-                Serial.println(
-                    "Student ID is empty. Nothing to send."
-                );
+                highlightOption(key);
 
-                displayRegistrationStatus(
-                    "ENTER STUDENT ID"
-                );
-
-                delay(1000);
-
-                displayReady();
-            }
-            else
-            {
-                Serial.println(
-                    "=========================="
-                );
-
-                Serial.print(
-                    "Student ID confirmed: "
-                );
-
-                Serial.println(
-                    studentID
-                );
-
-                Serial.println(
-                    "=========================="
-                );
-
-                sendRegistration();
+                if (sendAnswer(key))
+                {
+                    state = STATE_ANSWER_SENT;
+                }
+                else
+                {
+                    drawQuestionScreen();
+                    drawQuizClock(true);
+                }
             }
         }
-
-        // -------------------------------------------------
-        // ANSWER
-        // -------------------------------------------------
-
-        else if (
-            key >= 'A' &&
-            key <= 'D'
-        )
-        {
-            Serial.print(
-                "Answer selected: "
-            );
-
-            Serial.println(key);
-
-            // -------------------------------------------------
-            // 160x128 LANDSCAPE ANSWER SCREEN
-            // -------------------------------------------------
-
-            tft.fillScreen(
-                ST77XX_BLACK
-            );
-
-            tft.setTextColor(
-                ST77XX_WHITE
-            );
-
-            tft.setTextSize(1);
-
-            tft.setCursor(
-                45,
-                15
-            );
-
-            tft.println(
-                "ANSWER SELECTED"
-            );
-
-            tft.setTextColor(
-                ST77XX_YELLOW
-            );
-
-            tft.setTextSize(4);
-
-            tft.setCursor(
-                68,
-                45
-            );
-
-            tft.println(key);
-
-            // -------------------------------------------------
-            // Send answer together with currentQuestionID.
-            // BLE logic unchanged.
-            // -------------------------------------------------
-
-            sendAnswer(key);
-
-            delay(1000);
-
-            displayReady();
-        }
+        // Other states: keys ignored.
     }
 
     delay(10);
