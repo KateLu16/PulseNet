@@ -27,6 +27,42 @@
 Adafruit_ST7735 tft(TFT_CS, TFT_DC, TFT_RST);
 
 // =====================================================
+// UI THEME (mockup: Giao dien quiz TFT PulseNet HCMUTE)
+//
+// Dark background #0A0A14, blue header #1565D8 with a
+// thin cyan divider, dark navy panels #101830, cyan
+// accents #4FC3F7 for selection, gold #F5C518 for the
+// countdown ring, green/red for success/error.
+// =====================================================
+
+#define COL8(r, g, b) \
+    ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
+
+const uint16_t COL_BG       = COL8(10, 10, 20);
+const uint16_t COL_PANEL    = COL8(16, 24, 48);
+const uint16_t COL_PANEL_LT = COL8(22, 50, 74);
+const uint16_t COL_HEADER   = COL8(21, 101, 216);
+const uint16_t COL_BLUE     = COL8(33, 150, 243);
+const uint16_t COL_CYAN     = COL8(79, 195, 247);
+const uint16_t COL_GREEN    = COL8(34, 197, 94);
+const uint16_t COL_RED      = COL8(229, 57, 53);
+const uint16_t COL_GOLD     = COL8(245, 197, 24);
+const uint16_t COL_YELLOW   = COL8(255, 215, 0);
+const uint16_t COL_GRAY     = COL8(154, 160, 166);
+const uint16_t COL_DIM      = COL8(100, 108, 130);
+const uint16_t COL_TRACK    = COL8(42, 47, 58);
+const uint16_t COL_PINK     = COL8(240, 98, 146);
+const uint16_t COL_WHITE    = 0xFFFF;
+const uint16_t COL_BLACK    = 0x0000;
+
+#define HDR_H 16
+
+// Option rows on the question screen: 4 rows of 17px.
+
+#define OPT_Y(i) (51 + (i) * 19)
+#define OPT_H    17
+
+// =====================================================
 // KEYPAD 4x4
 // =====================================================
 
@@ -59,13 +95,13 @@ const char keyMap[4][4] = {
 // STATE MACHINE (Kahoot-style)
 // =====================================================
 //
-// LOGO          -> idle: HCMUTE logo, waiting for a session
+// LOGO          -> idle: dark screen, waiting for a session
 // LOBBY         -> session pushed: enter ID (open-ended)
-// REGISTERING   -> waiting for REGISTER_ACK
-// JOINED        -> in, waiting for the teacher to start
-// WAIT_QUESTION -> quiz running, waiting for a question
+// REGISTERING   -> waiting for REGISTER_ACK (spinner)
+// JOINED        -> in: joined screen, then quiz info
+// WAIT_QUESTION -> answer confirmed / waiting for next
 // QUESTION      -> question on screen, A-D to answer
-// ANSWER_SENT   -> choice highlighted, waiting for ACK
+// ANSWER_SENT   -> answer highlighted, waiting for ACK
 // RESULT        -> quiz over, showing score
 
 enum DeviceState {
@@ -80,6 +116,25 @@ enum DeviceState {
 };
 
 volatile DeviceState state = STATE_LOGO;
+
+// Sub-modes of STATE_WAIT_QUESTION.
+
+enum WaitMode {
+    WAIT_CONFIRMED,   // "Answer sent!" + your answer
+    WAIT_NEXT,        // hourglass, next question
+    WAIT_DONE         // all questions answered
+};
+
+volatile WaitMode waitMode = WAIT_NEXT;
+
+// Sub-modes of STATE_JOINED.
+
+enum JoinedPhase {
+    JOINED_HELLO,     // green check "JOINED!" (2s)
+    JOINED_INFO       // quiz information list
+};
+
+volatile JoinedPhase joinedPhase = JOINED_INFO;
 
 // =====================================================
 // DATA
@@ -126,10 +181,33 @@ bool entryOpen = false;
 int answeredCount = 0;
 int correctCount = 0;
 
+// Count each question at most once: a late ACK (after the
+// 5s timeout put us back on the question screen), a
+// re-answer, or a duplicate ACK for the same question must
+// not inflate the counters.
+
+String lastCountedQuestionID = "";
+bool lastCountedCorrect = false;
+
+// quiz_id of the session loaded from QUIZ_INFO. A running
+// QUIZ_INFO with a DIFFERENT quiz_id starts a fresh session
+// (score + countdown reset) even if the old one was never
+// properly finished on screen.
+
+int activeQuizID = 0;
+
 // Timeouts for missing ACKs.
 
 unsigned long registerSentAt = 0;
 unsigned long answerSentAt = 0;
+
+// UI bookkeeping.
+
+char lastAnswerChoice = '-';
+unsigned long waitConfirmedAt = 0;
+unsigned long joinedShownAt = 0;
+bool idCursorOn = true;
+volatile bool bleLinkLost = false;
 
 volatile bool gatewayConnected = false;
 
@@ -141,13 +219,16 @@ volatile bool pendingQuestion = false;
 volatile bool pendingAck = false;
 volatile bool pendingQuizInfo = false;
 volatile bool pendingQuizEnd = false;
+volatile bool pendingBleLost = false;
 
 String ackType = "";
+String ackQuestionID = "";
 String ackStatus = "";
 String ackReason = "";
 bool ackCorrect = false;
 
 String newQuizTitle = "";
+int newQuizID = 0;
 int newQuizTotal = 0;
 int newQuizTimeLimit = 0;
 bool newQuizRunning = false;
@@ -256,43 +337,54 @@ long jsonGetInt(
     return packet.substring(start, end).toInt();
 }
 
-// =====================================================
-// LAYOUT
-// =====================================================
+// JSON booleans are serialized UNQUOTED:
+//
+//     "correct":true
+//
+// jsonGetString cannot read them (it requires an opening
+// quote after the colon), so match the raw pattern instead.
+bool jsonGetBool(
+    const String& packet,
+    const char* key
+)
+{
+    String pattern =
+        "\"" + String(key) + "\":true";
 
-// Quiz clock: top-right corner (x 118..160, y 4..16).
-
-#define CLOCK_X 118
-#define CLOCK_Y 4
-#define CLOCK_W 42
-#define CLOCK_H 12
-
-// Option row Y positions on the question screen.
-
-const int optionY[4] = {68, 82, 96, 110};
+    return packet.indexOf(pattern) >= 0;
+}
 
 // =====================================================
 // FORWARD DECLARATIONS
 // =====================================================
 
+void drawSplashScreen();
+void drawIdleWaitScreen();
+void drawLobbyEntry();
+void updateIdBox(bool cursorOn);
+void drawConnectingScreen();
+void drawJoinedScreen();
+void drawQuizInfoScreen();
+void runStartCountdown();
+void drawQuestionScreen();
+void highlightOption(char choice);
+void drawSendingAnswerScreen();
+void drawAnswerConfirmedScreen();
+void drawNextQuestionScreen();
+void drawWaitDoneScreen();
+void drawTimeUpScreen();
+void drawConnectionLostScreen();
+void drawResultScreen();
 void showResultScreen();
-void drawQuizClock(bool force = false);
-void drawGatewayFooter();
-void displayLogoIdle();
-void drawSignalIcon();
-void displayLobbyEntry();
-void displayStudentID();
-void displayJoined();
-void displayQuizStarting();
 void displayMessage(
     const char* title,
     uint16_t titleColor,
     const String& line1,
     const String& line2
 );
-void displayWaitQuestion();
-void drawQuestionScreen();
-void highlightOption(char choice);
+void drawQuizClock(bool force);
+void redrawWaitScreen();
+bool allQuestionsAnswered();
 
 // =====================================================
 // BLE SERVER CALLBACK
@@ -311,11 +403,11 @@ class ServerCallbacks : public BLEServerCallbacks
     {
         deviceConnected = false;
         gatewayConnected = false;
+        bleLinkLost = true;
 
-        if (state == STATE_LOGO)
-        {
-            drawSignalIcon();
-        }
+        // Screen updates happen in loop() so the TFT is
+        // never touched from the BLE task.
+        pendingBleLost = true;
 
         Serial.println("BLE GATEWAY DISCONNECTED");
 
@@ -346,6 +438,7 @@ class ACKCallbacks : public BLECharacteristicCallbacks
 
         if (type == "QUIZ_INFO")
         {
+            newQuizID = jsonGetInt(value, "quiz_id");
             newQuizTitle = jsonGetString(value, "title");
             newQuizTotal = jsonGetInt(value, "total");
             newQuizTimeLimit = jsonGetInt(value, "time_limit");
@@ -366,10 +459,12 @@ class ACKCallbacks : public BLECharacteristicCallbacks
         else
         {
             ackType = type;
+            ackQuestionID =
+                jsonGetString(value, "question_id");
             ackStatus = jsonGetString(value, "status");
             ackReason = jsonGetString(value, "reason");
             ackCorrect =
-                jsonGetString(value, "correct") == "true";
+                jsonGetBool(value, "correct");
 
             pendingAck = true;
         }
@@ -467,8 +562,44 @@ char readKeypad()
 }
 
 // =====================================================
-// TEXT WRAP HELPER
+// TEXT HELPERS
 // =====================================================
+
+void printCentered(
+    const char* text,
+    int y,
+    uint8_t size,
+    uint16_t color
+)
+{
+    tft.setTextSize(size);
+    tft.setTextColor(color);
+
+    int w = strlen(text) * 6 * size;
+
+    int x = (160 - w) / 2;
+
+    if (x < 0)
+    {
+        x = 0;
+    }
+
+    tft.setCursor(x, y);
+    tft.print(text);
+}
+
+// Big title: size 2 when it fits, size 1 otherwise.
+void drawTitleAuto(
+    const char* text,
+    int y,
+    uint16_t color
+)
+{
+    uint8_t size =
+        ((int)strlen(text) * 12 <= 152) ? 2 : 1;
+
+    printCentered(text, y, size, color);
+}
 
 void drawWrappedText(
     const String& text,
@@ -516,103 +647,92 @@ void drawWrappedText(
     }
 }
 
-// =====================================================
-// QUIZ CLOCK (top-right corner, every screen)
-// =====================================================
-
-int clockRemainingSec()
+void drawWrappedCentered(
+    const String& text,
+    int y,
+    int maxCharsPerLine,
+    uint16_t color,
+    int maxLines = 3
+)
 {
-    if (!quizDeadlineSet)
+    String remaining = text;
+
+    int lines = 0;
+
+    while (remaining.length() > 0 && lines < maxLines)
     {
-        return -1;
-    }
+        int lineLength = maxCharsPerLine;
 
-    long remainingMs =
-        (long)quizDeadline - (long)millis();
+        if ((int)remaining.length() < lineLength)
+        {
+            lineLength = remaining.length();
+        }
 
-    return remainingMs > 0 ? (int)(remainingMs / 1000) : 0;
-}
+        if (lineLength < (int)remaining.length())
+        {
+            int spacePos =
+                remaining.lastIndexOf(' ', lineLength);
 
-void drawQuizClock(bool force)
-{
-    if (!quizDeadlineSet)
-    {
-        return;
-    }
+            if (spacePos > 0)
+            {
+                lineLength = spacePos;
+            }
+        }
 
-    unsigned long now = millis();
+        String line =
+            remaining.substring(0, lineLength);
 
-    if (!force && now - lastClockPaint < 250)
-    {
-        return;
-    }
+        line.trim();
 
-    lastClockPaint = now;
+        printCentered(line.c_str(), y, 1, color);
 
-    int remaining = clockRemainingSec();
+        remaining = remaining.substring(lineLength);
 
-    char buf[8];
+        remaining.trim();
 
-    snprintf(
-        buf,
-        sizeof(buf),
-        "%02d:%02d",
-        remaining / 60,
-        remaining % 60
-    );
+        y += 11;
 
-    tft.fillRect(
-        CLOCK_X,
-        CLOCK_Y,
-        CLOCK_W,
-        CLOCK_H,
-        ST77XX_BLACK
-    );
-
-    tft.setTextSize(1);
-
-    tft.setTextColor(
-        remaining <= 10 ? ST77XX_RED : ST77XX_YELLOW
-    );
-
-    tft.setCursor(CLOCK_X + 4, CLOCK_Y + 1);
-    tft.print(buf);
-
-    if (remaining <= 0 && !quizEnded)
-    {
-        showResultScreen();
+        lines++;
     }
 }
 
 // =====================================================
-// GATEWAY FOOTER
+// ICON HELPERS
 // =====================================================
 
-void drawGatewayFooter()
+// Arc segment used by rings and spinners. Angles in
+// degrees, 0 = right, growing clockwise on screen.
+void drawRingArc(
+    int cx,
+    int cy,
+    int r,
+    int startDeg,
+    int spanDeg,
+    uint16_t color
+)
 {
-    tft.fillRect(0, 118, 160, 10, ST77XX_BLACK);
+    int px = 0;
+    int py = 0;
 
-    tft.setTextSize(1);
+    for (int a = startDeg; a <= startDeg + spanDeg; a += 5)
+    {
+        float rad = a * 3.14159f / 180.0f;
 
-    tft.setTextColor(
-        gatewayConnected ? ST77XX_GREEN : ST77XX_RED
-    );
+        int x = cx + (int)(r * cos(rad) + 0.5f);
+        int y = cy + (int)(r * sin(rad) + 0.5f);
 
-    tft.setCursor(5, 119);
+        if (a > startDeg)
+        {
+            tft.drawLine(px, py, x, y, color);
+        }
 
-    tft.print("Gateway: ");
-
-    tft.println(gatewayConnected ? "OK" : "...");
+        px = x;
+        py = y;
+    }
 }
 
-// =====================================================
-// SCREEN: LOGO IDLE (waiting for a session)
-// =====================================================
-
-// Signal icon, top-left corner: a broadcast dot with
-// sound-wave arcs. Black while the gateway is linked;
-// gray with a red diagonal slash while it is not.
-
+// Broadcast waves opening upward (also used as the wifi
+// icon and the header BLE icon).
 void drawBroadcastArcs(
     int cx,
     int cy,
@@ -646,37 +766,343 @@ void drawBroadcastArcs(
     }
 }
 
-void drawSignalIcon()
+// One frame of the loading spinner. The track circles
+// fully cover the previous frame's arc.
+void drawSpinnerFrame(
+    int cx,
+    int cy,
+    int r,
+    int angleDeg
+)
 {
-    // White patch behind the icon.
-    tft.fillRect(2, 2, 30, 22, ST77XX_WHITE);
+    tft.drawCircle(cx, cy, r, COL_TRACK);
+    tft.drawCircle(cx, cy, r - 1, COL_TRACK);
 
-    int cx = 17;
-    int cy = 13;
+    drawRingArc(cx, cy, r, angleDeg, 90, COL_BLUE);
+    drawRingArc(cx, cy, r - 1, angleDeg, 90, COL_BLUE);
+}
 
-    uint16_t color =
-        gatewayConnected
-            ? ST77XX_BLACK
-            : 0xB596;  // light gray
+void drawCheckCircle(
+    int cx,
+    int cy,
+    int r,
+    uint16_t color
+)
+{
+    tft.fillCircle(cx, cy, r, color);
 
-    tft.fillCircle(cx, cy, 3, color);
-
-    drawBroadcastArcs(cx, cy, 8, color);
-    drawBroadcastArcs(cx, cy, 7, color);
-    drawBroadcastArcs(cx, cy, 12, color);
-    drawBroadcastArcs(cx, cy, 11, color);
-
-    if (!gatewayConnected)
+    for (int i = 0; i < 3; i++)
     {
-        // Red slash, bottom-left to top-right.
-        tft.drawLine(5, 21, 29, 5, ST77XX_RED);
-        tft.drawLine(6, 21, 30, 5, ST77XX_RED);
+        tft.drawLine(
+            cx - r / 2 - 1 + i, cy + 1,
+            cx - 3 + i, cy + r / 2,
+            COL_WHITE
+        );
+
+        tft.drawLine(
+            cx - 3 + i, cy + r / 2,
+            cx + r / 2 + 1 + i, cy - r / 2,
+            COL_WHITE
+        );
     }
 }
 
-void displayLogoIdle()
+void drawExclaimCircle(
+    int cx,
+    int cy,
+    int r,
+    uint16_t color
+)
 {
-    // White background + purple HCMUTE logo.
+    tft.fillCircle(cx, cy, r, color);
+
+    tft.fillRect(cx - 2, cy - r + 4, 4, r - 5, COL_WHITE);
+    tft.fillRect(cx - 2, cy + 3, 4, 4, COL_WHITE);
+}
+
+void drawClockSmallIcon(int cx, int cy, uint16_t color)
+{
+    tft.drawCircle(cx, cy, 4, color);
+
+    tft.drawLine(cx, cy, cx, cy - 3, color);
+    tft.drawLine(cx, cy, cx + 2, cy + 1, color);
+}
+
+void drawClockBig(int cx, int cy, int r, uint16_t color)
+{
+    tft.drawCircle(cx, cy, r, color);
+    tft.drawCircle(cx, cy, r - 1, color);
+
+    tft.drawLine(cx, cy, cx, cy - r + 4, color);
+    tft.drawLine(cx, cy, cx, cy - r + 5, color);
+    tft.drawLine(cx, cy, cx + r - 5, cy + 2, color);
+    tft.drawLine(cx, cy, cx + r - 6, cy + 2, color);
+}
+
+void drawWifiLost(int cx, int cy)
+{
+    tft.fillCircle(cx, cy + 4, 3, COL_RED);
+
+    drawBroadcastArcs(cx, cy + 4, 8, COL_RED);
+    drawBroadcastArcs(cx, cy + 4, 7, COL_RED);
+    drawBroadcastArcs(cx, cy + 4, 13, COL_RED);
+    drawBroadcastArcs(cx, cy + 4, 12, COL_RED);
+
+    tft.drawLine(cx - 16, cy - 16, cx + 16, cy + 10, COL_RED);
+    tft.drawLine(cx - 16, cy - 15, cx + 16, cy + 11, COL_RED);
+}
+
+void drawHourglass(int cx, int cy)
+{
+    tft.drawTriangle(
+        cx - 11, cy - 13, cx + 11, cy - 13, cx, cy - 1,
+        COL_BLUE
+    );
+
+    tft.drawTriangle(
+        cx - 11, cy + 13, cx + 11, cy + 13, cx, cy + 1,
+        COL_BLUE
+    );
+
+    tft.fillTriangle(
+        cx - 4, cy - 11, cx + 4, cy - 11, cx, cy - 4,
+        COL_GOLD
+    );
+
+    tft.fillTriangle(
+        cx - 6, cy + 11, cx + 6, cy + 11, cx, cy + 5,
+        COL_GOLD
+    );
+}
+
+void drawPaperPlane(int cx, int cy)
+{
+    tft.fillCircle(cx, cy, 16, COL_PANEL);
+
+    tft.fillTriangle(
+        cx - 8, cy + 8, cx + 9, cy - 9, cx + 9, cy - 3,
+        COL_WHITE
+    );
+
+    tft.fillTriangle(
+        cx - 8, cy + 8, cx + 9, cy - 3, cx - 1, cy + 1,
+        COL_CYAN
+    );
+}
+
+void drawTrophy(int cx, int cy)
+{
+    tft.fillCircle(cx, cy, 17, COL_GOLD);
+
+    // Trophy silhouette in dark on the gold circle.
+
+    tft.fillRoundRect(cx - 8, cy - 11, 16, 10, 2, COL_BG);
+
+    tft.drawCircle(cx - 11, cy - 6, 3, COL_BG);
+    tft.drawCircle(cx + 11, cy - 6, 3, COL_BG);
+
+    tft.fillRect(cx - 1, cy - 1, 3, 6, COL_BG);
+    tft.fillRect(cx - 6, cy + 5, 13, 3, COL_BG);
+
+    // Confetti.
+
+    tft.fillCircle(cx - 26, cy - 14, 1, COL_CYAN);
+    tft.fillCircle(cx + 24, cy - 10, 1, COL_PINK);
+    tft.fillCircle(cx - 30, cy + 8, 1, COL_GREEN);
+    tft.fillCircle(cx + 28, cy + 10, 1, COL_YELLOW);
+    tft.fillCircle(cx - 20, cy + 16, 1, COL_RED);
+    tft.fillCircle(cx + 20, cy - 18, 1, COL_CYAN);
+    tft.fillCircle(cx, cy - 22, 1, COL_PINK);
+    tft.fillCircle(cx - 14, cy - 20, 1, COL_YELLOW);
+}
+
+void drawTeacherIcon(int cx, int cy)
+{
+    // Board.
+
+    tft.drawRoundRect(cx - 24, cy - 14, 48, 32, 4, COL_GOLD);
+    tft.drawRoundRect(cx - 23, cy - 13, 46, 30, 3, COL_GOLD);
+
+    // Person.
+
+    tft.fillCircle(cx, cy - 3, 5, COL_WHITE);
+
+    tft.fillRoundRect(cx - 9, cy + 4, 18, 11, 4, COL_WHITE);
+}
+
+void drawDocIcon(int x, int y, uint16_t color)
+{
+    tft.drawRect(x, y, 10, 12, color);
+
+    for (int i = 0; i < 3; i++)
+    {
+        tft.drawFastHLine(x + 2, y + 3 + i * 3, 6, color);
+    }
+}
+
+void drawMiniClockIcon(int x, int y, uint16_t color)
+{
+    tft.drawCircle(x + 5, y + 5, 5, color);
+
+    tft.drawLine(x + 5, y + 5, x + 5, y + 1, color);
+    tft.drawLine(x + 5, y + 5, x + 8, y + 6, color);
+}
+
+void drawPeopleIcon(int x, int y, uint16_t color)
+{
+    tft.fillCircle(x + 3, y + 3, 3, color);
+    tft.fillCircle(x + 11, y + 4, 2, COL_DIM);
+
+    tft.fillRoundRect(x - 1, y + 7, 9, 6, 3, color);
+    tft.fillRoundRect(x + 8, y + 7, 7, 6, 3, COL_DIM);
+}
+
+// =====================================================
+// SHARED CHROME
+// =====================================================
+
+// Blue app bar with white title and a BLE status icon.
+void drawAppHeader(const char* title)
+{
+    tft.fillRect(0, 0, 160, HDR_H, COL_HEADER);
+    tft.drawFastHLine(0, HDR_H, 160, COL_CYAN);
+
+    tft.setTextSize(1);
+    tft.setTextColor(COL_WHITE);
+    tft.setCursor(5, 4);
+    tft.print(title);
+
+    uint16_t iconColor =
+        gatewayConnected ? COL_WHITE : COL_DIM;
+
+    tft.fillCircle(147, 11, 2, iconColor);
+
+    drawBroadcastArcs(147, 11, 4, iconColor);
+    drawBroadcastArcs(147, 11, 7, iconColor);
+}
+
+// Dark header of the question screen: "Q n/total" left,
+// clock icon + remaining time right (painted by
+// drawQuizClock).
+void drawQuestionHeader()
+{
+    tft.fillRect(0, 0, 160, HDR_H, COL_PANEL);
+    tft.drawFastHLine(0, HDR_H, 160, COL_CYAN);
+
+    char buf[24];
+
+    if (questionTotal > 0)
+    {
+        snprintf(
+            buf, sizeof(buf), "Q %d/%d",
+            currentQuestionNumber, questionTotal
+        );
+    }
+    else
+    {
+        snprintf(
+            buf, sizeof(buf), "Q %s",
+            currentQuestionID.c_str()
+        );
+    }
+
+    tft.setTextSize(1);
+    tft.setTextColor(COL_WHITE);
+    tft.setCursor(5, 4);
+    tft.print(buf);
+}
+
+void drawButton(
+    int x,
+    int y,
+    int w,
+    int h,
+    uint16_t color,
+    const char* label
+)
+{
+    tft.fillRoundRect(x, y, w, h, 5, COL_PANEL);
+
+    tft.drawRoundRect(x, y, w, h, 5, color);
+    tft.drawRoundRect(x + 1, y + 1, w - 2, h - 2, 4, color);
+
+    printCentered(label, y + (h - 8) / 2, 1, color);
+}
+
+// =====================================================
+// QUIZ CLOCK (question screen header)
+// =====================================================
+
+int clockRemainingSec()
+{
+    if (!quizDeadlineSet)
+    {
+        return -1;
+    }
+
+    long remainingMs =
+        (long)quizDeadline - (long)millis();
+
+    return remainingMs > 0 ? (int)(remainingMs / 1000) : 0;
+}
+
+void drawQuizClock(bool force)
+{
+    if (!quizDeadlineSet)
+    {
+        return;
+    }
+
+    unsigned long now = millis();
+
+    if (!force && now - lastClockPaint < 250)
+    {
+        return;
+    }
+
+    lastClockPaint = now;
+
+    // The clock only lives on the question screen; expiry
+    // itself is checked in loop() on every state.
+    if (state != STATE_QUESTION && !force)
+    {
+        return;
+    }
+
+    int remaining = clockRemainingSec();
+
+    char buf[8];
+
+    snprintf(
+        buf,
+        sizeof(buf),
+        "%02d:%02d",
+        remaining / 60,
+        remaining % 60
+    );
+
+    tft.fillRect(116, 0, 44, HDR_H, COL_PANEL);
+
+    drawClockSmallIcon(122, 8, COL_GRAY);
+
+    tft.setTextSize(1);
+
+    tft.setTextColor(
+        remaining <= 10 ? COL_RED : COL_YELLOW
+    );
+
+    tft.setCursor(128, 4);
+    tft.print(buf);
+}
+
+// =====================================================
+// SCREEN 1: SPLASH (boot only)
+// =====================================================
+
+void drawSplashScreen()
+{
+    // Full-screen HCMUTE logo (white background, purple
+    // stroke) with a bottom strip reserved for text.
     tft.drawRGBBitmap(
         0,
         0,
@@ -685,274 +1111,371 @@ void displayLogoIdle()
         LOGO_HEIGHT
     );
 
-    drawSignalIcon();
+    tft.fillRect(0, 96, 160, 32, ST77XX_WHITE);
 
-    // "Waiting for teacher..." centered near the bottom.
-    tft.fillRect(0, 110, 160, 14, ST77XX_WHITE);
+    // Loading bar: gray track + blue fill.
+    tft.fillRoundRect(30, 104, 100, 8, 4, COL_TRACK);
 
-    tft.setTextColor(ST77XX_BLACK);
-    tft.setTextSize(1);
+    for (int p = 0; p <= 100; p += 4)
+    {
+        int w = 96 * p / 100;
 
-    const char* msg = "Waiting for teacher...";
+        if (w < 4)
+        {
+            w = 4;
+        }
 
-    int16_t x =
-        (160 - (int)strlen(msg) * 6) / 2;
+        tft.fillRoundRect(32, 106, w, 4, 2, COL_HEADER);
 
-    tft.setCursor(x, 115);
-    tft.print(msg);
+        delay(22);
+    }
+
+    printCentered(
+        "Waiting for teacher...",
+        118,
+        1,
+        ST77XX_BLACK
+    );
+
+    delay(800);
+}
+
+// =====================================================
+// SCREEN 15: IDLE - WAITING FOR TEACHER
+// =====================================================
+
+void drawIdleWaitScreen()
+{
+    tft.fillScreen(COL_BG);
+
+    drawAppHeader("PulseNet");
+
+    drawTeacherIcon(80, 40);
+
+    drawTitleAuto("Waiting for teacher...", 68, COL_WHITE);
+
+    drawWrappedCentered(
+        "The quiz has not been started yet.",
+        88,
+        26,
+        COL_GRAY,
+        2
+    );
 
     lastClockPaint = 0;
 }
 
 // =====================================================
-// SCREEN: LOBBY ENTRY (open-ended ID entry)
+// SCREEN 2: ENTER STUDENT ID
 // =====================================================
 
-void displayLobbyEntry()
+void drawLobbyEntry()
 {
-    tft.fillScreen(ST77XX_BLACK);
+    tft.fillScreen(COL_BG);
 
-    // Quiz title (up to 2 lines).
-    tft.setTextColor(ST77XX_CYAN);
-    tft.setTextSize(1);
+    drawAppHeader("Enter Student ID");
+
+    // ID box: yellow border, dark panel.
+    tft.fillRoundRect(10, 24, 140, 30, 5, COL_BG);
+    tft.drawRoundRect(10, 24, 140, 30, 5, COL_YELLOW);
+
+    tft.fillRoundRect(12, 26, 136, 26, 4, COL_PANEL);
+
+    // Legend panel.
+    tft.fillRoundRect(10, 62, 140, 46, 5, COL_PANEL);
+
+    const char* keys[3] = {"0-9", "*", "#"};
+    const char* actions[3] =
+        {"Input number", "Clear", "Confirm"};
+
+    for (int i = 0; i < 3; i++)
+    {
+        int y = 70 + i * 12;
+
+        tft.setTextSize(1);
+        tft.setTextColor(COL_CYAN);
+        tft.setCursor(24, y);
+        tft.print(keys[i]);
+
+        tft.setTextColor(COL_WHITE);
+        tft.setCursor(54, y);
+        tft.print(actions[i]);
+    }
+
+    idCursorOn = true;
+
+    updateIdBox(true);
+}
+
+void updateIdBox(bool cursorOn)
+{
+    tft.fillRoundRect(14, 28, 132, 22, 4, COL_PANEL);
+
+    int len = studentID.length();
+
+    int size = len <= 9 ? 2 : 1;
+
+    int charW = 6 * size;
+
+    int textW = len * charW + (cursorOn ? charW : 0);
+
+    int x = 16 + (128 - textW) / 2;
+
+    if (x < 16)
+    {
+        x = 16;
+    }
+
+    tft.setTextSize(size);
+    tft.setTextColor(COL_YELLOW);
+    tft.setCursor(x, size == 2 ? 31 : 35);
+    tft.print(studentID);
+
+    if (cursorOn)
+    {
+        tft.print("_");
+    }
+}
+
+// =====================================================
+// SCREEN 3: CONNECTING (spinner animated in loop)
+// =====================================================
+
+void drawConnectingScreen()
+{
+    tft.fillScreen(COL_BG);
+
+    drawAppHeader("PulseNet");
+
+    drawSpinnerFrame(80, 46, 14, 0);
+
+    drawTitleAuto("Joining...", 70, COL_WHITE);
+
+    drawWrappedCentered(
+        "Sending your information to the server.",
+        94,
+        24,
+        COL_GRAY,
+        2
+    );
+}
+
+// =====================================================
+// SCREEN 4: JOINED
+// =====================================================
+
+void drawJoinedScreen()
+{
+    tft.fillScreen(COL_BG);
+
+    drawAppHeader("PulseNet");
+
+    drawCheckCircle(80, 34, 16, COL_GREEN);
+
+    printCentered("JOINED!", 58, 2, COL_GREEN);
+
+    String idLine = "ID: " + studentID;
+
+    printCentered(idLine.c_str(), 80, 1, COL_WHITE);
+
+    tft.fillRoundRect(15, 94, 130, 26, 5, COL_PANEL);
+
+    printCentered("Ready for quiz", 99, 1, COL_WHITE);
+    printCentered("Please wait...", 109, 1, COL_GRAY);
+}
+
+// =====================================================
+// SCREEN 5: QUIZ INFORMATION
+// =====================================================
+
+void drawQuizInfoScreen()
+{
+    tft.fillScreen(COL_BG);
+
+    drawAppHeader("PulseNet");
+
+    printCentered("Quiz Information", 22, 1, COL_GOLD);
 
     if (quizTitle.length() > 0)
     {
-        drawWrappedText(quizTitle, 5, 4, 26, 19);
+        drawWrappedCentered(quizTitle, 34, 26, COL_CYAN, 2);
     }
 
-    tft.setTextColor(ST77XX_WHITE);
-    tft.setTextSize(1);
-    tft.setCursor(5, 30);
-    tft.println("Enter Student ID:");
+    tft.fillRoundRect(12, 54, 136, 42, 5, COL_PANEL);
 
-    tft.fillRect(0, 42, 160, 20, ST77XX_BLACK);
-    tft.setTextColor(ST77XX_YELLOW);
-    tft.setTextSize(2);
-    tft.setCursor(10, 44);
-    tft.println(studentID);
+    int y = 60;
 
-    tft.setTextColor(ST77XX_WHITE);
-    tft.setTextSize(1);
-
-    tft.setCursor(5, 70);
-    tft.print("* Clear   # Confirm");
-
-    if (quizTimeLimitSec > 0)
-    {
-        char buf[8];
-        snprintf(buf, sizeof(buf), "%02d:%02d",
-                 quizTimeLimitSec / 60,
-                 quizTimeLimitSec % 60);
-
-        tft.setCursor(5, 88);
-        tft.print("Quiz time: ");
-        tft.print(buf);
-    }
+    char buf[24];
 
     if (quizTotal > 0)
     {
-        tft.setCursor(5, 100);
-        tft.print("Questions: ");
-        tft.print(quizTotal);
+        snprintf(buf, sizeof(buf), "%d questions", quizTotal);
+
+        drawDocIcon(24, y, COL_CYAN);
+
+        tft.setTextSize(1);
+        tft.setTextColor(COL_WHITE);
+        tft.setCursor(42, y + 2);
+        tft.print(buf);
+
+        y += 12;
     }
 
-    drawGatewayFooter();
-}
-
-void displayStudentID()
-{
-    tft.fillRect(0, 42, 160, 20, ST77XX_BLACK);
-
-    tft.setTextColor(ST77XX_YELLOW);
-    tft.setTextSize(2);
-    tft.setCursor(10, 44);
-    tft.println(studentID);
-
-    Serial.print("Student ID: ");
-    Serial.println(studentID);
-}
-
-// =====================================================
-// SCREEN: JOINED / STARTING
-// =====================================================
-
-void displayJoined()
-{
-    tft.fillScreen(ST77XX_BLACK);
-
-    tft.setTextColor(ST77XX_GREEN);
-    tft.setTextSize(2);
-    tft.setCursor(30, 14);
-    tft.println("JOINED!");
-
-    tft.setTextColor(ST77XX_WHITE);
-    tft.setTextSize(1);
-
-    tft.setCursor(10, 44);
-    tft.print("ID: ");
-
-    tft.setTextColor(ST77XX_YELLOW);
-    tft.println(studentID);
-
-    tft.setTextColor(ST77XX_WHITE);
-    tft.setCursor(10, 70);
-    tft.println("Waiting for the teacher");
-    tft.setCursor(10, 82);
-    tft.println("to start the quiz...");
-
-    drawGatewayFooter();
-}
-
-void displayQuizStarting()
-{
-    tft.fillScreen(ST77XX_BLACK);
-
-    tft.setTextColor(ST77XX_CYAN);
-    tft.setTextSize(2);
-    tft.setCursor(25, 14);
-    tft.println("GET READY!");
-
-    tft.setTextColor(ST77XX_WHITE);
-    tft.setTextSize(1);
-
-    tft.setCursor(10, 50);
-    tft.println("The quiz is starting...");
-
-    tft.setCursor(10, 70);
-    tft.println("ID: ");
-
-    tft.setTextColor(ST77XX_YELLOW);
-    tft.println(studentID);
-
-    drawGatewayFooter();
-}
-
-// =====================================================
-// SCREEN: SIMPLE MESSAGE
-// =====================================================
-
-void displayMessage(
-    const char* title,
-    uint16_t titleColor,
-    const String& line1,
-    const String& line2
-)
-{
-    tft.fillScreen(ST77XX_BLACK);
-
-    tft.setTextColor(titleColor);
-    tft.setTextSize(2);
-
-    int16_t x = (160 - (int)strlen(title) * 12) / 2;
-
-    if (x < 0)
+    if (quizTimeLimitSec > 0)
     {
-        x = 5;
+        snprintf(
+            buf, sizeof(buf), "%d minutes",
+            quizTimeLimitSec / 60 > 0
+                ? quizTimeLimitSec / 60
+                : quizTimeLimitSec
+        );
+
+        drawMiniClockIcon(24, y, COL_CYAN);
+
+        tft.setTextSize(1);
+        tft.setTextColor(COL_WHITE);
+        tft.setCursor(42, y + 2);
+        tft.print(buf);
+
+        y += 12;
     }
 
-    tft.setCursor(x, 14);
-    tft.println(title);
+    drawPeopleIcon(24, y, COL_CYAN);
 
-    tft.setTextColor(ST77XX_WHITE);
     tft.setTextSize(1);
+    tft.setTextColor(COL_WHITE);
+    tft.setCursor(42, y + 2);
+    tft.print("Please get ready!");
 
-    if (line1.length() > 0)
-    {
-        drawWrappedText(line1, 10, 50, 84, 24);
-    }
-
-    if (line2.length() > 0)
-    {
-        drawWrappedText(line2, 10, 86, 114, 24);
-    }
-
-    drawGatewayFooter();
+    drawButton(
+        25, 102, 110, 18, COL_CYAN, "Waiting to start..."
+    );
 }
 
 // =====================================================
-// SCREEN: WAIT FOR NEXT QUESTION
+// SCREEN 6: COUNTDOWN (quiz starting)
 // =====================================================
 
-void displayWaitQuestion()
+void drawCountdownFrame(int secondsLeft)
 {
-    tft.fillScreen(ST77XX_BLACK);
+    tft.fillScreen(COL_BG);
 
-    tft.setTextColor(ST77XX_GREEN);
-    tft.setTextSize(2);
-    tft.setCursor(45, 16);
-    tft.println("READY");
+    drawAppHeader("PulseNet");
 
-    tft.setTextColor(ST77XX_WHITE);
-    tft.setTextSize(1);
+    printCentered("Quiz will start in", 22, 1, COL_WHITE);
 
-    tft.setCursor(10, 42);
-    tft.print("ID: ");
+    // Progress ring: the gold arc grows as time passes.
+    tft.drawCircle(80, 62, 22, COL_TRACK);
+    tft.drawCircle(80, 62, 21, COL_TRACK);
 
-    tft.setTextColor(ST77XX_YELLOW);
-    tft.println(studentID);
+    int span = (6 - secondsLeft) * 72;
 
-    tft.setTextColor(ST77XX_WHITE);
-    tft.setCursor(10, 58);
-    tft.print("Answered: ");
-    tft.println(answeredCount);
-
-    tft.setCursor(10, 74);
-
-    if (questionTotal > 0 &&
-        answeredCount >= questionTotal)
+    if (span > 0)
     {
-        tft.println("All questions answered.");
-        tft.setCursor(10, 88);
-        tft.println("Waiting for the quiz to end...");
+        drawRingArc(80, 62, 22, -90, span, COL_GOLD);
+        drawRingArc(80, 62, 21, -90, span, COL_GOLD);
+    }
+
+    tft.setTextSize(3);
+    tft.setTextColor(COL_WHITE);
+    tft.setCursor(71, 50);
+    tft.print(secondsLeft);
+
+    printCentered("Get ready!", 98, 1, COL_GOLD);
+}
+
+void runStartCountdown()
+{
+    for (int s = 5; s >= 1; s--)
+    {
+        drawCountdownFrame(s);
+
+        unsigned long t0 = millis();
+
+        // Cut the countdown short if a question or a
+        // session update already arrived.
+        while (millis() - t0 < 1000)
+        {
+            if (pendingQuestion ||
+                pendingQuizInfo ||
+                pendingQuizEnd)
+            {
+                return;
+            }
+
+            delay(20);
+        }
+    }
+}
+
+// =====================================================
+// SCREEN 7: QUESTION
+// =====================================================
+
+void drawOptionRow(int index, bool selected)
+{
+    const String options[4] = {qA, qB, qC, qD};
+
+    int y = OPT_Y(index);
+
+    if (selected)
+    {
+        tft.fillRoundRect(
+            3, y, 154, OPT_H, 4, COL_PANEL_LT
+        );
+
+        tft.drawRoundRect(3, y, 154, OPT_H, 4, COL_CYAN);
+        tft.drawRoundRect(4, y + 1, 152, OPT_H - 2, 3, COL_CYAN);
+
+        tft.fillRoundRect(7, y + 2, 13, 13, 3, COL_CYAN);
+
+        tft.setTextSize(1);
+        tft.setTextColor(COL_BG);
+        tft.setCursor(10, y + 4);
+        tft.print((char)('A' + index));
     }
     else
     {
-        tft.println("Waiting for next question...");
+        tft.fillRoundRect(3, y, 154, OPT_H, 4, COL_PANEL);
+
+        tft.fillRoundRect(7, y + 2, 13, 13, 3, COL_HEADER);
+
+        tft.setTextSize(1);
+        tft.setTextColor(COL_WHITE);
+        tft.setCursor(10, y + 4);
+        tft.print((char)('A' + index));
     }
 
-    drawGatewayFooter();
-}
+    tft.setTextColor(COL_WHITE);
+    tft.setCursor(24, y + 5);
 
-// =====================================================
-// SCREEN: QUESTION
-// =====================================================
+    const String& text = options[index];
+
+    if ((int)text.length() > 22)
+    {
+        tft.print(text.substring(0, 19));
+        tft.print("...");
+    }
+    else
+    {
+        tft.print(text);
+    }
+}
 
 void drawQuestionScreen()
 {
-    tft.fillScreen(ST77XX_BLACK);
+    tft.fillScreen(COL_BG);
 
-    tft.setTextColor(ST77XX_CYAN);
+    drawQuestionHeader();
+
     tft.setTextSize(1);
-    tft.setCursor(5, 5);
-    tft.print("Question ");
+    tft.setTextColor(COL_WHITE);
 
-    tft.setTextColor(ST77XX_YELLOW);
-
-    if (questionTotal > 0)
-    {
-        tft.print(currentQuestionNumber);
-        tft.print("/");
-        tft.print(questionTotal);
-    }
-    else
-    {
-        tft.print(currentQuestionID);
-    }
-
-    tft.setTextColor(ST77XX_WHITE);
-    tft.setTextSize(1);
-    drawWrappedText(qText, 5, 20, 64, 26);
-
-    const String options[4] = {qA, qB, qC, qD};
+    drawWrappedText(qText, 5, 21, 49, 26);
 
     for (int i = 0; i < 4; i++)
     {
-        tft.setTextColor(ST77XX_WHITE);
-        tft.setCursor(5, optionY[i]);
-        tft.print((char)('A' + i));
-        tft.print(". ");
-        tft.println(options[i]);
+        drawOptionRow(i, false);
     }
 
     lastClockPaint = 0;
@@ -967,35 +1490,195 @@ void highlightOption(char choice)
         return;
     }
 
-    const String options[4] = {qA, qB, qC, qD};
-
-    tft.fillRect(
-        0,
-        optionY[index] - 2,
-        160,
-        14,
-        ST77XX_BLUE
-    );
-
-    tft.setTextColor(ST77XX_WHITE);
-    tft.setTextSize(1);
-    tft.setCursor(5, optionY[index]);
-
-    tft.print((char)('A' + index));
-    tft.print(". ");
-    tft.println(options[index]);
-
-    tft.fillRect(0, 124, 160, 4, ST77XX_BLACK);
-
-    tft.setTextColor(ST77XX_CYAN);
-    tft.setTextSize(1);
-    tft.setCursor(5, 124);
-    tft.print("Sending...");
+    drawOptionRow(index, true);
 }
 
 // =====================================================
-// SCREEN: RESULT
+// SCREEN 8: SENDING ANSWER (spinner animated in loop)
 // =====================================================
+
+void drawSendingAnswerScreen()
+{
+    tft.fillScreen(COL_BG);
+
+    drawAppHeader("PulseNet");
+
+    drawPaperPlane(80, 44);
+
+    drawSpinnerFrame(80, 44, 21, 0);
+
+    printCentered("Sending answer...", 76, 1, COL_CYAN);
+
+    printCentered("Please wait...", 94, 1, COL_GRAY);
+}
+
+// =====================================================
+// SCREEN 9: ANSWER CONFIRMED
+// =====================================================
+
+void drawAnswerConfirmedScreen()
+{
+    tft.fillScreen(COL_BG);
+
+    drawAppHeader("PulseNet");
+
+    drawCheckCircle(80, 30, 13, COL_GREEN);
+
+    printCentered("Answer sent!", 50, 2, COL_GREEN);
+
+    tft.fillRoundRect(20, 70, 120, 28, 5, COL_PANEL);
+
+    tft.setTextSize(1);
+    tft.setTextColor(COL_WHITE);
+    tft.setCursor(32, 76);
+
+    if (questionTotal > 0)
+    {
+        tft.print("Q: ");
+        tft.print(currentQuestionNumber);
+        tft.print("/");
+        tft.print(questionTotal);
+    }
+    else
+    {
+        tft.print("Q: ");
+        tft.print(currentQuestionID);
+    }
+
+    tft.setCursor(32, 87);
+    tft.print("Your answer: ");
+
+    tft.setTextColor(COL_YELLOW);
+
+    if (lastAnswerChoice >= 'A' && lastAnswerChoice <= 'D')
+    {
+        tft.print(lastAnswerChoice);
+    }
+    else
+    {
+        tft.print("-");
+    }
+
+    drawWrappedCentered(
+        "Waiting for next question...",
+        104,
+        26,
+        COL_GRAY,
+        2
+    );
+}
+
+// =====================================================
+// SCREEN 10: NEXT QUESTION
+// =====================================================
+
+void drawNextQuestionScreen()
+{
+    tft.fillScreen(COL_BG);
+
+    drawAppHeader("PulseNet");
+
+    drawHourglass(80, 40);
+
+    drawTitleAuto("Next question...", 72, COL_WHITE);
+
+    printCentered("Please wait...", 92, 1, COL_GRAY);
+}
+
+// WAIT_DONE variant: everything answered, quiz not ended.
+void drawWaitDoneScreen()
+{
+    tft.fillScreen(COL_BG);
+
+    drawAppHeader("PulseNet");
+
+    drawCheckCircle(80, 32, 14, COL_GREEN);
+
+    printCentered("All done!", 54, 2, COL_GREEN);
+
+    drawWrappedCentered(
+        "All questions answered.",
+        80,
+        26,
+        COL_WHITE,
+        1
+    );
+
+    drawWrappedCentered(
+        "Waiting for the quiz to end...",
+        100,
+        26,
+        COL_GRAY,
+        2
+    );
+}
+
+void redrawWaitScreen()
+{
+    if (waitMode == WAIT_CONFIRMED)
+    {
+        drawAnswerConfirmedScreen();
+    }
+    else if (waitMode == WAIT_DONE)
+    {
+        drawWaitDoneScreen();
+    }
+    else
+    {
+        drawNextQuestionScreen();
+    }
+}
+
+// =====================================================
+// SCREEN 11: QUIZ FINISHED (result)
+// =====================================================
+
+void drawResultScreen()
+{
+    tft.fillScreen(COL_BG);
+
+    drawAppHeader("PulseNet");
+
+    drawTrophy(80, 36);
+
+    printCentered("Quiz Finished!", 58, 1, COL_WHITE);
+
+    int total = questionTotal > 0 ? questionTotal : quizTotal;
+
+    float score =
+        total > 0
+            ? (float)correctCount * 10.0f / (float)total
+            : 0.0f;
+
+    tft.fillRoundRect(18, 68, 124, 38, 5, COL_PANEL);
+
+    tft.setTextSize(1);
+
+    tft.setTextColor(COL_WHITE);
+    tft.setCursor(28, 74);
+    tft.print("Correct: ");
+
+    tft.setTextColor(COL_GREEN);
+    tft.print(correctCount);
+
+    tft.setTextColor(COL_WHITE);
+    tft.print(" / ");
+    tft.print(total);
+
+    tft.setCursor(28, 88);
+    tft.print("Score:");
+
+    char buf[12];
+
+    snprintf(buf, sizeof(buf), "%.1f/10", score);
+
+    tft.setTextSize(2);
+    tft.setTextColor(COL_YELLOW);
+    tft.setCursor(66, 86);
+    tft.print(buf);
+
+    printCentered("Thank you!", 112, 1, COL_GRAY);
+}
 
 void showResultScreen()
 {
@@ -1003,51 +1686,18 @@ void showResultScreen()
     entryOpen = false;
     state = STATE_RESULT;
 
-    tft.fillScreen(ST77XX_BLACK);
-
-    tft.setTextColor(ST77XX_CYAN);
-    tft.setTextSize(2);
-    tft.setCursor(22, 12);
-    tft.println("QUIZ ENDED");
+    drawResultScreen();
 
     int total = questionTotal > 0 ? questionTotal : quizTotal;
-
-    tft.setTextColor(ST77XX_WHITE);
-    tft.setTextSize(1);
-
-    tft.setCursor(10, 45);
-    tft.print("Correct: ");
-
-    tft.setTextColor(ST77XX_GREEN);
-    tft.print(correctCount);
-
-    tft.setTextColor(ST77XX_WHITE);
-    tft.print(" / ");
-    tft.print(total);
 
     float score =
         total > 0
             ? (float)correctCount * 10.0f / (float)total
             : 0.0f;
 
-    tft.setTextColor(ST77XX_WHITE);
-    tft.setCursor(10, 65);
-    tft.print("Score: ");
-
-    tft.setTextColor(ST77XX_YELLOW);
-    tft.setTextSize(2);
-    tft.setCursor(10, 80);
-
     char buf[12];
 
     snprintf(buf, sizeof(buf), "%.1f/10", score);
-
-    tft.println(buf);
-
-    tft.setTextColor(ST77XX_WHITE);
-    tft.setTextSize(1);
-    tft.setCursor(10, 108);
-    tft.println("See the teacher's screen.");
 
     Serial.print("RESULT: correct=");
     Serial.print(correctCount);
@@ -1055,6 +1705,92 @@ void showResultScreen()
     Serial.print(total);
     Serial.print(" score=");
     Serial.println(buf);
+}
+
+// =====================================================
+// SCREEN 12: CONNECTION LOST
+// =====================================================
+
+void drawConnectionLostScreen()
+{
+    tft.fillScreen(COL_BG);
+
+    drawAppHeader("PulseNet");
+
+    drawWifiLost(80, 38);
+
+    drawTitleAuto("Connection Lost", 64, COL_RED);
+
+    drawWrappedCentered(
+        "Please stay in range of the classroom.",
+        86,
+        26,
+        COL_GRAY,
+        2
+    );
+}
+
+// =====================================================
+// SCREENS 13/14 + GENERIC MESSAGE
+// (13: Invalid ID — red "!" circle, title, body)
+// (14: Time's up! — red clock + button)
+// =====================================================
+
+void displayMessage(
+    const char* title,
+    uint16_t titleColor,
+    const String& line1,
+    const String& line2
+)
+{
+    tft.fillScreen(COL_BG);
+
+    drawAppHeader("PulseNet");
+
+    drawExclaimCircle(80, 36, 16, titleColor);
+
+    drawTitleAuto(title, 58, titleColor);
+
+    if (line1.length() > 0)
+    {
+        drawWrappedCentered(line1, 82, 24, COL_WHITE, 3);
+    }
+
+    if (line2.length() > 0)
+    {
+        // Single trailing line; clamp so it cannot overflow
+        // the 160px width.
+        String l2 = line2;
+
+        if ((int)l2.length() > 26)
+        {
+            l2 = l2.substring(0, 26);
+        }
+
+        printCentered(
+            l2.c_str(),
+            line1.length() > 0 ? 115 : 86,
+            1,
+            COL_GRAY
+        );
+    }
+}
+
+void drawTimeUpScreen()
+{
+    tft.fillScreen(COL_BG);
+
+    drawAppHeader("PulseNet");
+
+    drawClockBig(80, 38, 14, COL_RED);
+
+    drawTitleAuto("Time's up!", 60, COL_RED);
+
+    printCentered("No answer was sent.", 82, 1, COL_CYAN);
+
+    drawButton(
+        25, 96, 110, 20, COL_CYAN, "Next question..."
+    );
 }
 
 // =====================================================
@@ -1067,7 +1803,7 @@ bool sendRegistration()
     {
         displayMessage(
             "BLE ERROR",
-            ST77XX_RED,
+            COL_RED,
             "Gateway not connected.",
             ""
         );
@@ -1134,6 +1870,16 @@ bool sendAnswer(char answer)
 }
 
 // =====================================================
+// HELPERS
+// =====================================================
+
+bool allQuestionsAnswered()
+{
+    return questionTotal > 0 &&
+           answeredCount >= questionTotal;
+}
+
+// =====================================================
 // HANDLE QUIZ INFO (session lifecycle)
 // =====================================================
 
@@ -1171,6 +1917,11 @@ void handleQuizInfo()
 
     if (newQuizLobby)
     {
+        if (newQuizID > 0)
+        {
+            activeQuizID = newQuizID;
+        }
+
         // Already joined? Keep the joined screen.
         if (state == STATE_JOINED ||
             state == STATE_REGISTERING)
@@ -1183,7 +1934,7 @@ void handleQuizInfo()
 
         state = STATE_LOBBY;
 
-        displayLobbyEntry();
+        drawLobbyEntry();
 
         return;
     }
@@ -1194,18 +1945,27 @@ void handleQuizInfo()
 
     if (newQuizRunning)
     {
-        bool alreadyRunning = quizRunning;
+        // A different quiz_id means a FRESH session — even
+        // if the previous one was never cleaned up on
+        // screen (e.g. teacher finished quiz A and started
+        // quiz B right away). Reset score + countdown.
+        bool newSession =
+            newQuizID > 0 && newQuizID != activeQuizID;
+
+        if (newSession)
+        {
+            activeQuizID = newQuizID;
+            answeredCount = 0;
+            correctCount = 0;
+            lastCountedQuestionID = "";
+            lastCountedCorrect = false;
+            quizDeadlineSet = false;
+        }
 
         quizRunning = true;
         quizEnded = false;
 
-        if (!alreadyRunning)
-        {
-            answeredCount = 0;
-            correctCount = 0;
-        }
-
-        if (!quizDeadlineSet || !alreadyRunning)
+        if (!quizDeadlineSet)
         {
             if (quizTimeLimitSec > 0)
             {
@@ -1224,16 +1984,24 @@ void handleQuizInfo()
             state == STATE_JOINED ||
             state == STATE_RESULT)
         {
-            state = STATE_WAIT_QUESTION;
+            runStartCountdown();
 
-            displayQuizStarting();
+            state = STATE_WAIT_QUESTION;
+            waitMode = WAIT_NEXT;
+
+            drawNextQuestionScreen();
         }
 
         return;
     }
 
     // -------------------------------------------------
-    // DRAFT: no active session (or lobby cancelled)
+    // DRAFT: no active session (or lobby cancelled).
+    //
+    // If the result screen is showing, KEEP it — the
+    // teacher may still be reviewing scores. The next
+    // lobby/running QUIZ_INFO (new quiz_id) starts a
+    // fresh session and pulls the device out of it.
     // -------------------------------------------------
 
     quizRunning = false;
@@ -1242,13 +2010,21 @@ void handleQuizInfo()
     entryOpen = false;
     answeredCount = 0;
     correctCount = 0;
+    lastCountedQuestionID = "";
+    lastCountedCorrect = false;
     questionTotal = 0;
+    activeQuizID = 0;
 
     studentID = "";
 
+    if (state == STATE_RESULT)
+    {
+        return;
+    }
+
     state = STATE_LOGO;
 
-    displayLogoIdle();
+    drawIdleWaitScreen();
 }
 
 // =====================================================
@@ -1267,19 +2043,44 @@ void handleAck()
     if (ackType == "ACK" && ackStatus == "CONNECTED")
     {
         gatewayConnected = true;
+        bleLinkLost = false;
 
+        // Repaint whatever screen the device is on so the
+        // header BLE icon turns white.
         if (state == STATE_LOGO)
         {
-            // White idle screen: just repaint the signal icon.
-            drawSignalIcon();
+            drawIdleWaitScreen();
         }
         else if (state == STATE_LOBBY)
         {
-            displayLobbyEntry();
+            drawLobbyEntry();
+        }
+        else if (state == STATE_REGISTERING)
+        {
+            drawConnectingScreen();
         }
         else if (state == STATE_JOINED)
         {
-            displayJoined();
+            joinedPhase = JOINED_INFO;
+
+            drawQuizInfoScreen();
+        }
+        else if (state == STATE_WAIT_QUESTION)
+        {
+            redrawWaitScreen();
+        }
+        else if (state == STATE_QUESTION)
+        {
+            drawQuestionScreen();
+            drawQuizClock(true);
+        }
+        else if (state == STATE_ANSWER_SENT)
+        {
+            drawSendingAnswerScreen();
+        }
+        else if (state == STATE_RESULT)
+        {
+            drawResultScreen();
         }
 
         return;
@@ -1297,24 +2098,26 @@ void handleAck()
         if (ackStatus == "ACCEPTED")
         {
             state = STATE_JOINED;
+            joinedPhase = JOINED_HELLO;
+            joinedShownAt = millis();
 
-            displayJoined();
+            drawJoinedScreen();
         }
         else
         {
             String reason =
                 ackReason.length() > 0
                     ? ackReason
-                    : "UNKNOWN";
+                    : "This student ID is not registered or not allowed.";
 
             displayMessage(
-                "REJECTED",
-                ST77XX_RED,
-                "Registration failed:",
-                reason
+                "Invalid ID",
+                COL_RED,
+                reason,
+                ""
             );
 
-            delay(2000);
+            delay(2500);
 
             // Let the student try again (entry stays open
             // until the teacher starts the quiz).
@@ -1322,7 +2125,7 @@ void handleAck()
             {
                 state = STATE_LOBBY;
 
-                displayLobbyEntry();
+                drawLobbyEntry();
             }
         }
 
@@ -1333,39 +2136,75 @@ void handleAck()
 
     if (ackType == "ANSWER_ACK")
     {
-        if (state != STATE_ANSWER_SENT)
-        {
-            return;
-        }
-
         if (ackStatus == "ACCEPTED")
         {
-            answeredCount++;
-
-            if (ackCorrect)
+            // Count each question at most once. The gateway
+            // may re-ACK the same question after a re-answer
+            // or a duplicate packet, and an ACK may arrive
+            // LATE — after the 5s timeout put us back on
+            // the question screen.
+            if (ackQuestionID.length() > 0 &&
+                ackQuestionID == lastCountedQuestionID)
             {
-                correctCount++;
-            }
+                if (ackCorrect && !lastCountedCorrect)
+                {
+                    correctCount++;
+                }
+                else if (!ackCorrect &&
+                         lastCountedCorrect)
+                {
+                    correctCount--;
+                }
 
-            state = STATE_WAIT_QUESTION;
-
-            if (questionTotal > 0 &&
-                answeredCount >= questionTotal)
-            {
-                displayWaitQuestion();
+                lastCountedCorrect = ackCorrect;
             }
             else
             {
-                displayMessage(
-                    "SENT",
-                    ST77XX_CYAN,
-                    "Answer recorded.",
-                    "Loading next question..."
-                );
+                answeredCount++;
+
+                if (ackCorrect)
+                {
+                    correctCount++;
+                }
+
+                lastCountedQuestionID = ackQuestionID;
+                lastCountedCorrect = ackCorrect;
+            }
+
+            // Accept the ACK while waiting OR when the same
+            // question is still on screen (late ACK). If the
+            // next question was already pushed, only the
+            // counters above change — nothing to redraw.
+            if (state == STATE_ANSWER_SENT ||
+                (state == STATE_QUESTION &&
+                 ackQuestionID == currentQuestionID))
+            {
+                state = STATE_WAIT_QUESTION;
+
+                if (allQuestionsAnswered())
+                {
+                    waitMode = WAIT_DONE;
+
+                    drawWaitDoneScreen();
+                }
+                else
+                {
+                    waitMode = WAIT_CONFIRMED;
+                    waitConfirmedAt = millis();
+
+                    drawAnswerConfirmedScreen();
+                }
             }
         }
         else
         {
+            // A rejection only matters while we are still
+            // waiting for the ACK of that answer.
+            if (state != STATE_ANSWER_SENT)
+            {
+                return;
+            }
+
             String reason =
                 ackReason.length() > 0
                     ? ackReason
@@ -1373,7 +2212,7 @@ void handleAck()
 
             displayMessage(
                 "REJECTED",
-                ST77XX_RED,
+                COL_RED,
                 "Answer rejected:",
                 reason
             );
@@ -1519,7 +2358,12 @@ void setup()
 
     setupBLE();
 
-    displayLogoIdle();
+    // Screen 1 (splash) then screen 15 (idle wait).
+    drawSplashScreen();
+
+    state = STATE_LOGO;
+
+    drawIdleWaitScreen();
 
     Serial.println("System ready. Waiting for a quiz session...");
 }
@@ -1558,6 +2402,23 @@ void loop()
     // 1. Pending BLE events
     // -------------------------------------------------
 
+    if (pendingBleLost)
+    {
+        pendingBleLost = false;
+
+        if (state == STATE_LOGO)
+        {
+            // Idle screen: just refresh the header icon.
+            drawIdleWaitScreen();
+        }
+        else if (state != STATE_RESULT)
+        {
+            // Keep the final score on screen; otherwise
+            // show the connection-lost screen.
+            drawConnectionLostScreen();
+        }
+    }
+
     if (pendingQuizEnd)
     {
         pendingQuizEnd = false;
@@ -1589,10 +2450,10 @@ void loop()
         Serial.print("New question: ");
         Serial.println(currentQuestionID);
 
+        state = STATE_QUESTION;
+
         drawQuestionScreen();
         drawQuizClock(true);
-
-        state = STATE_QUESTION;
     }
 
     if (pendingAck)
@@ -1603,46 +2464,142 @@ void loop()
     }
 
     // -------------------------------------------------
-    // 2. Clocks
+    // 2. Quiz countdown (expiry checked in every state,
+    //    the clock itself paints on the question screen)
     // -------------------------------------------------
 
     if (!quizEnded && quizDeadlineSet && state != STATE_RESULT)
     {
-        drawQuizClock(false);
+        if (clockRemainingSec() <= 0)
+        {
+            bool answeredAll = allQuestionsAnswered();
+
+            if (!answeredAll &&
+                (state == STATE_QUESTION ||
+                 state == STATE_ANSWER_SENT))
+            {
+                drawTimeUpScreen();
+
+                delay(2000);
+            }
+
+            showResultScreen();
+        }
+        else if (state == STATE_QUESTION)
+        {
+            drawQuizClock(false);
+        }
     }
 
     // -------------------------------------------------
-    // 3. Timeouts
+    // 3. Screen animations / sub-screens
+    // -------------------------------------------------
+
+    static unsigned long lastAnimTick = 0;
+    static int spinnerAngle = 0;
+
+    if (millis() - lastAnimTick >= 80)
+    {
+        lastAnimTick = millis();
+
+        if (state == STATE_REGISTERING)
+        {
+            spinnerAngle = (spinnerAngle + 25) % 360;
+
+            drawSpinnerFrame(80, 46, 14, spinnerAngle);
+        }
+        else if (state == STATE_ANSWER_SENT)
+        {
+            spinnerAngle = (spinnerAngle + 25) % 360;
+
+            drawSpinnerFrame(80, 44, 21, spinnerAngle);
+        }
+    }
+
+    static unsigned long lastBlinkTick = 0;
+
+    if (state == STATE_LOBBY &&
+        millis() - lastBlinkTick >= 500)
+    {
+        lastBlinkTick = millis();
+
+        idCursorOn = !idCursorOn;
+
+        updateIdBox(idCursorOn);
+    }
+
+    if (state == STATE_JOINED &&
+        joinedPhase == JOINED_HELLO &&
+        millis() - joinedShownAt > 2000)
+    {
+        joinedPhase = JOINED_INFO;
+
+        drawQuizInfoScreen();
+    }
+
+    if (state == STATE_WAIT_QUESTION &&
+        waitMode == WAIT_CONFIRMED &&
+        millis() - waitConfirmedAt > 4000)
+    {
+        if (allQuestionsAnswered())
+        {
+            waitMode = WAIT_DONE;
+
+            drawWaitDoneScreen();
+        }
+        else
+        {
+            waitMode = WAIT_NEXT;
+
+            drawNextQuestionScreen();
+        }
+    }
+
+    // -------------------------------------------------
+    // 4. Timeouts
     // -------------------------------------------------
 
     if (state == STATE_REGISTERING &&
         millis() - registerSentAt > 6000)
     {
-        displayMessage(
-            "NO REPLY",
-            ST77XX_RED,
-            "Gateway did not reply.",
-            ""
-        );
+        if (deviceConnected)
+        {
+            displayMessage(
+                "NO REPLY",
+                COL_RED,
+                "Gateway did not reply.",
+                ""
+            );
 
-        delay(1500);
+            delay(1500);
+        }
+        else
+        {
+            delay(600);
+        }
 
         // Entry stays open; let the student retry.
         state = STATE_LOBBY;
-        displayLobbyEntry();
+        drawLobbyEntry();
     }
 
     if (state == STATE_ANSWER_SENT &&
         millis() - answerSentAt > 5000)
     {
-        drawQuestionScreen();
-        drawQuizClock(true);
+        if (deviceConnected)
+        {
+            drawQuestionScreen();
+            drawQuizClock(true);
+        }
+        // While disconnected the connection-lost screen
+        // stays up; the question is repainted on
+        // reconnect (see the ACK CONNECTED handler).
 
         state = STATE_QUESTION;
     }
 
     // -------------------------------------------------
-    // 4. Keypad (state-aware)
+    // 5. Keypad (state-aware)
     // -------------------------------------------------
 
     char key = readKeypad();
@@ -1662,14 +2619,20 @@ void loop()
                 {
                     studentID += key;
 
-                    displayStudentID();
+                    updateIdBox(true);
+
+                    Serial.print("Student ID: ");
+                    Serial.println(studentID);
                 }
             }
             else if (key == '*')
             {
                 studentID = "";
 
-                displayStudentID();
+                updateIdBox(true);
+
+                Serial.print("Student ID: ");
+                Serial.println(studentID);
             }
             else if (key == '#')
             {
@@ -1677,14 +2640,14 @@ void loop()
                 {
                     displayMessage(
                         "NO ID",
-                        ST77XX_RED,
+                        COL_RED,
                         "Enter your student ID first.",
                         ""
                     );
 
                     delay(1200);
 
-                    displayLobbyEntry();
+                    drawLobbyEntry();
                 }
                 else if (
                     idPrefix.length() > 0 &&
@@ -1693,14 +2656,14 @@ void loop()
                 {
                     displayMessage(
                         "WRONG ID",
-                        ST77XX_RED,
+                        COL_RED,
                         "ID must start with:",
                         idPrefix
                     );
 
                     delay(1500);
 
-                    displayLobbyEntry();
+                    drawLobbyEntry();
                 }
                 else if (
                     idLength > 0 &&
@@ -1709,25 +2672,20 @@ void loop()
                 {
                     displayMessage(
                         "WRONG ID",
-                        ST77XX_RED,
+                        COL_RED,
                         "ID must be exactly",
                         String(idLength) + " digits"
                     );
 
                     delay(1500);
 
-                    displayLobbyEntry();
+                    drawLobbyEntry();
                 }
                 else if (sendRegistration())
                 {
                     state = STATE_REGISTERING;
 
-                    displayMessage(
-                        "JOINING",
-                        ST77XX_CYAN,
-                        "Registering ID: " + studentID,
-                        ""
-                    );
+                    drawConnectingScreen();
                 }
             }
         }
@@ -1738,11 +2696,15 @@ void loop()
         {
             if (key >= 'A' && key <= 'D')
             {
+                lastAnswerChoice = key;
+
                 highlightOption(key);
 
                 if (sendAnswer(key))
                 {
                     state = STATE_ANSWER_SENT;
+
+                    drawSendingAnswerScreen();
                 }
                 else
                 {
