@@ -67,6 +67,23 @@ const I18N = {
         "setup.noQuestions": "No questions yet.",
         "setup.importOk": "Imported {imported} new questions, skipped {duplicates} duplicates.",
         "setup.importBad": "Import failed — nothing was saved.",
+        "setup.aiTitle": "Generate from document (AI)",
+        "setup.aiHint": "Upload a PDF / DOCX / TXT — AI reads the document and writes multiple-choice questions into this quiz. Review every question below before pushing to devices.",
+        "setup.aiPickFile": "Choose document",
+        "setup.aiNum": "Number of questions",
+        "setup.aiLang": "Question language",
+        "setup.aiLangAuto": "Same as document",
+        "setup.aiLangVi": "Vietnamese",
+        "setup.aiLangEn": "English",
+        "setup.aiBtn": "Generate with AI",
+        "setup.aiWorking": "Generating…",
+        "setup.aiOk": "AI generated {n} question(s) from “{file}”. Review them in the list below.",
+        "setup.aiBad": "AI generation failed.",
+        "setup.aiReady": "AI ready",
+        "setup.aiNoKey": "No API key",
+        "setup.aiStatusDown": "AI status unavailable",
+        "setup.aiKeyHint": "AI is not configured yet — add GEMINI_API_KEY to backend/.env on the Pi, then restart the server.",
+        "setup.aiDraftOnly": "Only a draft quiz can receive AI questions.",
         "setup.needQuestions": "Import at least 1 question first.",
         "setup.needTime": "Set the time limit first.",
         "setup.saved": "Settings saved. Pushing to devices…",
@@ -184,6 +201,23 @@ const I18N = {
         "setup.noQuestions": "Chưa có câu hỏi nào.",
         "setup.importOk": "Đã nhập {imported} câu mới, bỏ qua {duplicates} câu trùng.",
         "setup.importBad": "Nhập thất bại — không lưu gì.",
+        "setup.aiTitle": "Tạo câu hỏi từ tài liệu (AI)",
+        "setup.aiHint": "Tải lên file PDF / DOCX / TXT — AI đọc tài liệu và soạn câu hỏi trắc nghiệm vào quiz này. Hãy xem lại từng câu bên dưới trước khi gửi xuống thiết bị.",
+        "setup.aiPickFile": "Chọn tài liệu",
+        "setup.aiNum": "Số câu hỏi",
+        "setup.aiLang": "Ngôn ngữ câu hỏi",
+        "setup.aiLangAuto": "Theo tài liệu",
+        "setup.aiLangVi": "Tiếng Việt",
+        "setup.aiLangEn": "Tiếng Anh",
+        "setup.aiBtn": "Sinh câu hỏi bằng AI",
+        "setup.aiWorking": "Đang sinh câu hỏi…",
+        "setup.aiOk": "AI đã sinh {n} câu hỏi từ “{file}”. Xem lại ở danh sách bên dưới.",
+        "setup.aiBad": "Sinh câu hỏi bằng AI thất bại.",
+        "setup.aiReady": "AI sẵn sàng",
+        "setup.aiNoKey": "Chưa có API key",
+        "setup.aiStatusDown": "Không xem được trạng thái AI",
+        "setup.aiKeyHint": "AI chưa được cấu hình — thêm GEMINI_API_KEY vào backend/.env trên Pi rồi khởi động lại server.",
+        "setup.aiDraftOnly": "Chỉ quiz ở trạng thái Nháp mới nhận được câu hỏi AI.",
         "setup.needQuestions": "Hãy nhập ít nhất 1 câu hỏi trước.",
         "setup.needTime": "Hãy đặt thời gian làm bài trước.",
         "setup.saved": "Đã lưu cài đặt. Đang gửi xuống thiết bị…",
@@ -441,6 +475,8 @@ function renderBadge() {
     const badge = $("#quizBadge");
     badge.textContent = t(STATUS_KEY[q.status] || q.status);
     badge.className = "badge badge-" + q.status;
+
+    updateAiCard();
 }
 
 async function createQuiz() {
@@ -568,6 +604,89 @@ function renderImportResult(result, ok) {
     }
 
     box.innerHTML = html;
+}
+
+/* ---------------- Tab: SETUP — AI generation ---------------- */
+
+async function refreshAiStatus() {
+    const chip = $("#aiStatusChip");
+
+    let st;
+    try {
+        st = await api("/api/ai/status");
+    } catch {
+        chip.textContent = t("setup.aiStatusDown");
+        chip.className = "chip chip-warn";
+        return;
+    }
+
+    if (st.configured) {
+        chip.textContent = `${t("setup.aiReady")} · ${st.model}`;
+        chip.className = "chip chip-ok";
+        $("#aiKeyHint").classList.add("hidden");
+    } else {
+        chip.textContent = t("setup.aiNoKey");
+        chip.className = "chip chip-warn";
+        $("#aiKeyHint").classList.remove("hidden");
+    }
+}
+
+function updateAiCard() {
+    const isDraft = state.quiz ? state.quiz.status === "draft" : false;
+    const hasFile = $("#aiFile").files.length > 0;
+
+    const btn = $("#aiGenerateBtn");
+    btn.disabled = !isDraft || !hasFile;
+    btn.title = !isDraft ? t("setup.aiDraftOnly") : "";
+}
+
+async function generateAi() {
+    const input = $("#aiFile");
+
+    if (!input.files.length) { toast(t("setup.noFile"), true); return; }
+
+    const fd = new FormData();
+    fd.append("file", input.files[0]);
+    fd.append("num_questions", $("#aiNum").value || "10");
+    fd.append("language", $("#aiLang").value);
+
+    const btn = $("#aiGenerateBtn");
+    btn.disabled = true;
+    btn.textContent = t("setup.aiWorking");
+
+    const box = $("#aiResult");
+    box.classList.add("hidden");
+
+    try {
+        let result;
+
+        try {
+            result = await api(`/api/quizzes/${state.quizId}/questions/generate-ai`, {
+                method: "POST",
+                body: fd,
+            });
+        } catch (err) {
+            // Backend errors arrive as a string detail — surface it.
+            throw typeof err.detail === "string" ? new Error(err.detail) : err;
+        }
+
+        box.classList.remove("hidden");
+        box.innerHTML = `<div class="import-box import-ok"><b>✔</b> ${esc(t("setup.aiOk", { n: result.generated, file: result.filename }))}</div>`;
+
+        toast(t("setup.aiOk", { n: result.generated, file: result.filename }));
+
+        input.value = "";
+        $("#aiFileName").textContent = t("setup.noFile");
+
+        await loadQuestions();
+    } catch (err) {
+        box.classList.remove("hidden");
+        box.innerHTML = `<div class="import-box import-bad"><b>✖</b> ${esc(t("setup.aiBad"))} ${esc(err.message || "")}</div>`;
+        toast(errMsg(err), true);
+    } finally {
+        btn.textContent = t("setup.aiBtn");
+        updateAiCard();
+    }
 }
 
 async function importCsv() {
@@ -1048,6 +1167,17 @@ function bindEvents() {
     $("#templateBtn").addEventListener("click", downloadTemplate);
     $("#pushBtn").addEventListener("click", pushToDevices);
 
+    const aiFileInput = $("#aiFile");
+    aiFileInput.addEventListener("change", () => {
+        $("#aiFileName").textContent = aiFileInput.files.length
+            ? aiFileInput.files[0].name
+            : t("setup.noFile");
+        updateAiCard();
+    });
+
+    $("#aiGenerateBtn").addEventListener("click", generateAi);
+    $("#aiNum").addEventListener("change", updateAiCard);
+
     $("#startBtn").addEventListener("click", startQuiz);
     $("#finishBtn").addEventListener("click", finishQuiz);
     $("#cancelLobbyBtn").addEventListener("click", cancelLobby);
@@ -1058,6 +1188,7 @@ function bindEvents() {
         applyI18n();
         renderGateway();
         setConn($("#connStatus .dot").classList.contains("dot-green"));
+        refreshAiStatus();
         if (state.quizId != null) {
             loadQuestions().then(() => {});
         }
@@ -1075,6 +1206,8 @@ async function init() {
 
     await refreshGateway();
     setInterval(refreshGateway, 2000);
+
+    refreshAiStatus();
 
     await loadQuizzes();
 }

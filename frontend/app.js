@@ -11,6 +11,8 @@
 const I18N = {
     en: {
         "app.subtitle": "Wireless classroom quiz system",
+        "app.teacher": "Teacher",
+        "app.teacherRole": "Room console",
         "conn.connecting": "Connecting…",
         "conn.ok": "Server connected",
         "conn.lost": "Server lost",
@@ -24,31 +26,40 @@ const I18N = {
         "quiz.label": "Quiz",
         "quiz.refresh": "Reload quiz list",
         "quiz.newPlaceholder": "New quiz name, e.g. IoT Midterm",
-        "quiz.create": "+ Create",
+        "quiz.create": "Create",
         "quiz.none": "— No quizzes —",
         "empty.title": "No quiz selected.",
         "empty.hint": "Create a new quiz above, or pick one from the list.",
-        "tabs.setup": "🎯 Setup",
-        "tabs.live": "📡 Live session",
-        "tabs.results": "🏅 Results",
-        "tabs.stats": "📊 Statistics",
+        "tabs.setup": "Setup",
+        "tabs.live": "Live session",
+        "tabs.results": "Results",
+        "tabs.stats": "Statistics",
+        "page.setup.t": "Session setup",
+        "page.setup.s": "Import questions and configure the class session",
+        "page.live.t": "Live session",
+        "page.live.s": "Lobby, quiz clock and student tracker",
+        "page.results.t": "Results",
+        "page.results.s": "Scores and per-student breakdown",
+        "page.stats.t": "Statistics",
+        "page.stats.s": "Per-question answer analysis",
         "status.draft": "Draft",
         "status.lobby": "Lobby",
         "status.running": "Live",
         "status.finished": "Finished",
-        "setup.importTitle": "📝 Import questions",
+        "setup.importTitle": "Import questions",
         "setup.importHint": "CSV columns: <code>Question, A, B, C, D, Correct Answer</code>. The whole file is validated before anything is saved.",
-        "setup.pickFile": "📁 Choose CSV",
+        "setup.pickFile": "Choose CSV",
         "setup.noFile": "No file selected",
-        "setup.importBtn": "⬆ Import",
+        "setup.importBtn": "Import",
         "setup.template": "Download template",
-        "setup.settingsTitle": "⚙️ Session settings",
+        "setup.templateBtn": "CSV template",
+        "setup.settingsTitle": "Session settings",
         "setup.timeLimit": "Time limit (minutes)",
         "setup.expected": "Students in class",
         "setup.prefix": "Student ID prefix",
         "setup.length": "ID length",
-        "setup.pushBtn": "🚀 Push to devices",
-        "setup.pushHint": "Devices will show the quiz name and accept student IDs for 10 seconds.",
+        "setup.pushBtn": "Push to devices",
+        "setup.pushHint": "Devices will show the quiz name and wait for students to enter their IDs.",
         "setup.questionsList": "Question list",
         "setup.colNo": "No.",
         "setup.colQuestion": "Question",
@@ -56,6 +67,23 @@ const I18N = {
         "setup.noQuestions": "No questions yet.",
         "setup.importOk": "Imported {imported} new questions, skipped {duplicates} duplicates.",
         "setup.importBad": "Import failed — nothing was saved.",
+        "setup.aiTitle": "Generate from document (AI)",
+        "setup.aiHint": "Upload a PDF / DOCX / TXT — AI reads the document and writes multiple-choice questions into this quiz. Review every question below before pushing to devices.",
+        "setup.aiPickFile": "Choose document",
+        "setup.aiNum": "Number of questions",
+        "setup.aiLang": "Question language",
+        "setup.aiLangAuto": "Same as document",
+        "setup.aiLangVi": "Vietnamese",
+        "setup.aiLangEn": "English",
+        "setup.aiBtn": "Generate with AI",
+        "setup.aiWorking": "Generating…",
+        "setup.aiOk": "AI generated {n} question(s) from “{file}”. Review them in the list below.",
+        "setup.aiBad": "AI generation failed.",
+        "setup.aiReady": "AI ready",
+        "setup.aiNoKey": "No API key",
+        "setup.aiStatusDown": "AI status unavailable",
+        "setup.aiKeyHint": "AI is not configured yet — add GEMINI_API_KEY to backend/.env on the Pi, then restart the server.",
+        "setup.aiDraftOnly": "Only a draft quiz can receive AI questions.",
         "setup.needQuestions": "Import at least 1 question first.",
         "setup.needTime": "Set the time limit first.",
         "setup.saved": "Settings saved. Pushing to devices…",
@@ -63,13 +91,13 @@ const I18N = {
         "setup.minutes": "{m} min",
         "live.draftTitle": "Quiz not pushed yet",
         "live.draftHint": "Set up questions, time limit and class info in the Setup tab, then push the session to the devices.",
-        "live.lobbyTitle": "🚪 Lobby",
+        "live.lobbyTitle": "Lobby",
         "live.joinedHint": "students joined",
-        "live.startBtn": "▶ Start quiz",
+        "live.startBtn": "Start quiz",
         "live.cancelBtn": "Cancel",
-        "live.lobbyHint": "Devices are accepting student IDs (10-second window). Start when everyone is in.",
+        "live.lobbyHint": "Devices are accepting student IDs — start whenever everyone is in.",
         "live.timeLeft": "Time left",
-        "live.finishBtn": "⏹ Finish",
+        "live.finishBtn": "Finish",
         "live.progress": "Progress",
         "live.gatewayTitle": "Gateway",
         "live.followTable": "Live student tracker",
@@ -87,7 +115,7 @@ const I18N = {
         "live.runningHint": "The quiz clock runs for the whole class; each student advances after every answer.",
         "live.finishedTitle": "Quiz finished",
         "live.finishedHint": "Check the Results and Statistics tabs for the full breakdown.",
-        "live.startOk": "Quiz started! Good luck to the class 🎉",
+        "live.startOk": "Quiz started! Good luck to the class.",
         "live.finishConfirm": "Finish the quiz? Students cannot answer anymore.",
         "live.finishOk": "Quiz finished. See Results for scores.",
         "live.cancelOk": "Lobby cancelled — back to setup.",
@@ -117,6 +145,8 @@ const I18N = {
     },
     vi: {
         "app.subtitle": "Hệ thống trắc nghiệm không dây",
+        "app.teacher": "Giảng viên",
+        "app.teacherRole": "Bảng điều khiển lớp",
         "conn.connecting": "Đang kết nối…",
         "conn.ok": "Đã kết nối server",
         "conn.lost": "Mất kết nối server",
@@ -130,31 +160,40 @@ const I18N = {
         "quiz.label": "Buổi quiz",
         "quiz.refresh": "Tải lại danh sách quiz",
         "quiz.newPlaceholder": "Tên quiz mới, ví dụ: Kiểm tra IoT",
-        "quiz.create": "+ Tạo quiz",
+        "quiz.create": "Tạo quiz",
         "quiz.none": "— Chưa có quiz nào —",
         "empty.title": "Chưa chọn buổi quiz nào.",
         "empty.hint": "Tạo quiz mới ở trên, hoặc chọn một quiz từ danh sách.",
-        "tabs.setup": "🎯 Soạn & Cài đặt",
-        "tabs.live": "📡 Phiên trực tiếp",
-        "tabs.results": "🏅 Kết quả",
-        "tabs.stats": "📊 Thống kê",
+        "tabs.setup": "Soạn & Cài đặt",
+        "tabs.live": "Phiên trực tiếp",
+        "tabs.results": "Kết quả",
+        "tabs.stats": "Thống kê",
+        "page.setup.t": "Soạn & Cài đặt",
+        "page.setup.s": "Nhập câu hỏi và cấu hình buổi kiểm tra",
+        "page.live.t": "Phiên trực tiếp",
+        "page.live.s": "Sảnh chờ, đồng hồ và theo dõi sinh viên",
+        "page.results.t": "Kết quả",
+        "page.results.s": "Điểm số từng sinh viên",
+        "page.stats.t": "Thống kê",
+        "page.stats.s": "Phân tích đáp án từng câu hỏi",
         "status.draft": "Nháp",
         "status.lobby": "Sảnh chờ",
         "status.running": "Đang chạy",
         "status.finished": "Đã kết thúc",
-        "setup.importTitle": "📝 Nhập câu hỏi",
+        "setup.importTitle": "Nhập câu hỏi",
         "setup.importHint": "Cột CSV: <code>Question, A, B, C, D, Correct Answer</code>. Cả file được kiểm tra trước khi lưu.",
-        "setup.pickFile": "📁 Chọn file CSV",
+        "setup.pickFile": "Chọn file CSV",
         "setup.noFile": "Chưa chọn file",
-        "setup.importBtn": "⬆ Nhập câu hỏi",
+        "setup.importBtn": "Nhập câu hỏi",
         "setup.template": "Tải file mẫu",
-        "setup.settingsTitle": "⚙️ Cài đặt buổi thi",
+        "setup.templateBtn": "File mẫu CSV",
+        "setup.settingsTitle": "Cài đặt buổi thi",
         "setup.timeLimit": "Thời gian làm bài (phút)",
         "setup.expected": "Số sinh viên trong lớp",
         "setup.prefix": "Tiền tố MSSV",
         "setup.length": "Độ dài MSSV",
-        "setup.pushBtn": "🚀 Gửi xuống thiết bị",
-        "setup.pushHint": "Thiết bị sẽ hiện tên bài kiểm tra và nhận MSSV trong 10 giây.",
+        "setup.pushBtn": "Gửi xuống thiết bị",
+        "setup.pushHint": "Thiết bị sẽ hiện tên bài kiểm tra và chờ sinh viên nhập MSSV.",
         "setup.questionsList": "Danh sách câu hỏi",
         "setup.colNo": "STT",
         "setup.colQuestion": "Câu hỏi",
@@ -162,6 +201,23 @@ const I18N = {
         "setup.noQuestions": "Chưa có câu hỏi nào.",
         "setup.importOk": "Đã nhập {imported} câu mới, bỏ qua {duplicates} câu trùng.",
         "setup.importBad": "Nhập thất bại — không lưu gì.",
+        "setup.aiTitle": "Tạo câu hỏi từ tài liệu (AI)",
+        "setup.aiHint": "Tải lên file PDF / DOCX / TXT — AI đọc tài liệu và soạn câu hỏi trắc nghiệm vào quiz này. Hãy xem lại từng câu bên dưới trước khi gửi xuống thiết bị.",
+        "setup.aiPickFile": "Chọn tài liệu",
+        "setup.aiNum": "Số câu hỏi",
+        "setup.aiLang": "Ngôn ngữ câu hỏi",
+        "setup.aiLangAuto": "Theo tài liệu",
+        "setup.aiLangVi": "Tiếng Việt",
+        "setup.aiLangEn": "Tiếng Anh",
+        "setup.aiBtn": "Sinh câu hỏi bằng AI",
+        "setup.aiWorking": "Đang sinh câu hỏi…",
+        "setup.aiOk": "AI đã sinh {n} câu hỏi từ “{file}”. Xem lại ở danh sách bên dưới.",
+        "setup.aiBad": "Sinh câu hỏi bằng AI thất bại.",
+        "setup.aiReady": "AI sẵn sàng",
+        "setup.aiNoKey": "Chưa có API key",
+        "setup.aiStatusDown": "Không xem được trạng thái AI",
+        "setup.aiKeyHint": "AI chưa được cấu hình — thêm GEMINI_API_KEY vào backend/.env trên Pi rồi khởi động lại server.",
+        "setup.aiDraftOnly": "Chỉ quiz ở trạng thái Nháp mới nhận được câu hỏi AI.",
         "setup.needQuestions": "Hãy nhập ít nhất 1 câu hỏi trước.",
         "setup.needTime": "Hãy đặt thời gian làm bài trước.",
         "setup.saved": "Đã lưu cài đặt. Đang gửi xuống thiết bị…",
@@ -169,13 +225,13 @@ const I18N = {
         "setup.minutes": "{m} phút",
         "live.draftTitle": "Quiz chưa gửi xuống thiết bị",
         "live.draftHint": "Soạn câu hỏi, đặt thời gian và thông tin lớp ở tab Soạn & Cài đặt, sau đó gửi phiên xuống thiết bị.",
-        "live.lobbyTitle": "🚪 Sảnh chờ",
+        "live.lobbyTitle": "Sảnh chờ",
         "live.joinedHint": "sinh viên đã vào",
-        "live.startBtn": "▶ Bắt đầu quiz",
+        "live.startBtn": "Bắt đầu quiz",
         "live.cancelBtn": "Hủy",
-        "live.lobbyHint": "Thiết bị đang nhận MSSV (cửa sổ 10 giây). Bắt đầu khi đủ người.",
+        "live.lobbyHint": "Thiết bị đang nhận MSSV — bắt đầu khi đủ người.",
         "live.timeLeft": "Thời gian còn lại",
-        "live.finishBtn": "⏹ Kết thúc",
+        "live.finishBtn": "Kết thúc",
         "live.progress": "Tiến độ",
         "live.gatewayTitle": "Gateway",
         "live.followTable": "Theo dõi sinh viên trực tiếp",
@@ -193,7 +249,7 @@ const I18N = {
         "live.runningHint": "Đồng hồ chạy chung cho cả lớp; mỗi sinh viên tự chuyển câu sau khi trả lời.",
         "live.finishedTitle": "Quiz đã kết thúc",
         "live.finishedHint": "Xem tab Kết quả và Thống kê để biết chi tiết.",
-        "live.startOk": "Quiz đã bắt đầu! Chúc lớp làm bài tốt 🎉",
+        "live.startOk": "Quiz đã bắt đầu! Chúc lớp làm bài tốt.",
         "live.finishConfirm": "Kết thúc quiz? Sinh viên sẽ không trả lời thêm được.",
         "live.finishOk": "Quiz đã kết thúc. Xem điểm ở tab Kết quả.",
         "live.cancelOk": "Đã hủy sảnh chờ — quay lại bước soạn.",
@@ -252,7 +308,7 @@ function applyI18n() {
     });
 
     const btn = $("#langBtn");
-    btn.textContent = lang === "en" ? "🇻🇳 VI" : "🇬🇧 EN";
+    btn.textContent = lang === "en" ? "VI" : "EN";
     btn.title = lang === "en" ? "Chuyển sang tiếng Việt" : "Switch to English";
 
     document.documentElement.lang = lang;
@@ -419,6 +475,8 @@ function renderBadge() {
     const badge = $("#quizBadge");
     badge.textContent = t(STATUS_KEY[q.status] || q.status);
     badge.className = "badge badge-" + q.status;
+
+    updateAiCard();
 }
 
 async function createQuiz() {
@@ -438,8 +496,19 @@ async function createQuiz() {
 
 /* ---------------- Tabs ---------------- */
 
+const PAGE_META = {
+    setup: ["page.setup.t", "page.setup.s"],
+    live: ["page.live.t", "page.live.s"],
+    results: ["page.results.t", "page.results.s"],
+    stats: ["page.stats.t", "page.stats.s"],
+};
+
 async function switchTab(tab) {
     state.tab = tab;
+
+    const meta = PAGE_META[tab] || PAGE_META.setup;
+    $("#pageTitle").textContent = t(meta[0]);
+    $("#pageSub").textContent = t(meta[1]);
 
     document.querySelectorAll(".tab").forEach((b) =>
         b.classList.toggle("active", b.dataset.tab === tab)
@@ -535,6 +604,89 @@ function renderImportResult(result, ok) {
     }
 
     box.innerHTML = html;
+}
+
+/* ---------------- Tab: SETUP — AI generation ---------------- */
+
+async function refreshAiStatus() {
+    const chip = $("#aiStatusChip");
+
+    let st;
+    try {
+        st = await api("/api/ai/status");
+    } catch {
+        chip.textContent = t("setup.aiStatusDown");
+        chip.className = "chip chip-warn";
+        return;
+    }
+
+    if (st.configured) {
+        chip.textContent = `${t("setup.aiReady")} · ${st.model}`;
+        chip.className = "chip chip-ok";
+        $("#aiKeyHint").classList.add("hidden");
+    } else {
+        chip.textContent = t("setup.aiNoKey");
+        chip.className = "chip chip-warn";
+        $("#aiKeyHint").classList.remove("hidden");
+    }
+}
+
+function updateAiCard() {
+    const isDraft = state.quiz ? state.quiz.status === "draft" : false;
+    const hasFile = $("#aiFile").files.length > 0;
+
+    const btn = $("#aiGenerateBtn");
+    btn.disabled = !isDraft || !hasFile;
+    btn.title = !isDraft ? t("setup.aiDraftOnly") : "";
+}
+
+async function generateAi() {
+    const input = $("#aiFile");
+
+    if (!input.files.length) { toast(t("setup.noFile"), true); return; }
+
+    const fd = new FormData();
+    fd.append("file", input.files[0]);
+    fd.append("num_questions", $("#aiNum").value || "10");
+    fd.append("language", $("#aiLang").value);
+
+    const btn = $("#aiGenerateBtn");
+    btn.disabled = true;
+    btn.textContent = t("setup.aiWorking");
+
+    const box = $("#aiResult");
+    box.classList.add("hidden");
+
+    try {
+        let result;
+
+        try {
+            result = await api(`/api/quizzes/${state.quizId}/questions/generate-ai`, {
+                method: "POST",
+                body: fd,
+            });
+        } catch (err) {
+            // Backend errors arrive as a string detail — surface it.
+            throw typeof err.detail === "string" ? new Error(err.detail) : err;
+        }
+
+        box.classList.remove("hidden");
+        box.innerHTML = `<div class="import-box import-ok"><b>✔</b> ${esc(t("setup.aiOk", { n: result.generated, file: result.filename }))}</div>`;
+
+        toast(t("setup.aiOk", { n: result.generated, file: result.filename }));
+
+        input.value = "";
+        $("#aiFileName").textContent = t("setup.noFile");
+
+        await loadQuestions();
+    } catch (err) {
+        box.classList.remove("hidden");
+        box.innerHTML = `<div class="import-box import-bad"><b>✖</b> ${esc(t("setup.aiBad"))} ${esc(err.message || "")}</div>`;
+        toast(errMsg(err), true);
+    } finally {
+        btn.textContent = t("setup.aiBtn");
+        updateAiCard();
+    }
 }
 
 async function importCsv() {
@@ -1015,6 +1167,17 @@ function bindEvents() {
     $("#templateBtn").addEventListener("click", downloadTemplate);
     $("#pushBtn").addEventListener("click", pushToDevices);
 
+    const aiFileInput = $("#aiFile");
+    aiFileInput.addEventListener("change", () => {
+        $("#aiFileName").textContent = aiFileInput.files.length
+            ? aiFileInput.files[0].name
+            : t("setup.noFile");
+        updateAiCard();
+    });
+
+    $("#aiGenerateBtn").addEventListener("click", generateAi);
+    $("#aiNum").addEventListener("change", updateAiCard);
+
     $("#startBtn").addEventListener("click", startQuiz);
     $("#finishBtn").addEventListener("click", finishQuiz);
     $("#cancelLobbyBtn").addEventListener("click", cancelLobby);
@@ -1025,6 +1188,7 @@ function bindEvents() {
         applyI18n();
         renderGateway();
         setConn($("#connStatus .dot").classList.contains("dot-green"));
+        refreshAiStatus();
         if (state.quizId != null) {
             loadQuestions().then(() => {});
         }
@@ -1042,6 +1206,8 @@ async function init() {
 
     await refreshGateway();
     setInterval(refreshGateway, 2000);
+
+    refreshAiStatus();
 
     await loadQuizzes();
 }

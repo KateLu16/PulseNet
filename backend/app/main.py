@@ -10,6 +10,7 @@ from app.api.quizzes import router as quizzes_router
 from app.api.devices import router as devices_router
 from app.api.questions import router as questions_router
 from app.api.responses import router as responses_router
+from app.api.ai_generate import router as ai_generate_router
 
 from app.api.analytics import router as analytics_router
 from app.api.monitoring import router as monitoring_router
@@ -35,6 +36,7 @@ app.include_router(devices_router)
 app.include_router(quizzes_router)
 app.include_router(questions_router)
 app.include_router(responses_router)
+app.include_router(ai_generate_router)
 app.include_router(analytics_router)
 app.include_router(monitoring_router)
 
