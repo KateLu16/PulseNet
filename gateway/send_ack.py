@@ -515,6 +515,23 @@ def get_running_quiz():
 
         return None
 
+    # ------------------------------------------------
+    # 1. The quiz this gateway last announced via
+    #    QUIZ_INFO (lobby or running) wins — the
+    #    device on screen is answering to THAT quiz.
+    # ------------------------------------------------
+
+    if ACTIVE_QUIZ_ID is not None:
+
+        for quiz in result:
+
+            if (
+                quiz.get("id") == ACTIVE_QUIZ_ID
+                and quiz.get("status")
+                in ("lobby", "running")
+            ):
+                return quiz
+
     running_quizzes = [
         quiz
         for quiz in result
@@ -526,11 +543,33 @@ def get_running_quiz():
         # ------------------------------------------------
         # No running quiz.
         #
-        # Fall back to the NEWEST draft quiz so students
-        # can register BEFORE the teacher starts the quiz
-        # (the backend accepts registration for both
-        # draft and running quizzes).
+        # Fall back to the NEWEST LOBBY quiz (Kahoot
+        # flow: students register while the teacher
+        # waits in the lobby), then to the newest
+        # draft quiz.
         # ------------------------------------------------
+
+        lobby_quizzes = [
+            quiz
+            for quiz in result
+            if quiz.get("status") == "lobby"
+        ]
+
+        if lobby_quizzes:
+
+            lobby_quizzes.sort(
+                key=lambda quiz: quiz.get("id") or 0,
+                reverse=True,
+            )
+
+            print(
+                "[INFO] No running quiz. "
+                "Using newest lobby quiz "
+                f"{lobby_quizzes[0].get('id')} "
+                "for registration."
+            )
+
+            return lobby_quizzes[0]
 
         draft_quizzes = [
             quiz
@@ -562,7 +601,7 @@ def get_running_quiz():
             return draft_quizzes[0]
 
         print(
-            "[INFO] No running or draft quiz."
+            "[INFO] No running, lobby or draft quiz."
         )
 
         return None
