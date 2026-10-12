@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <SPI.h>
+#include <esp_mac.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
 
@@ -12,9 +13,18 @@
 
 // =====================================================
 // DEVICE
+//
+// All boards run identical code, but the backend requires
+// a UNIQUE device_code per device, and the advertised BLE
+// name doubles as that code. The name is therefore derived
+// from the BT MAC suffix at boot (e.g. PULSENET-B0B2), so
+// flashing the same binary to every board still yields a
+// distinct identity per device.
 // =====================================================
 
-#define DEVICE_NAME "PULSENET-001"
+#define DEVICE_NAME_PREFIX "PULSENET"
+
+char deviceName[16] = DEVICE_NAME_PREFIX;
 
 // =====================================================
 // TFT - 160x128 LANDSCAPE
@@ -57,10 +67,44 @@ const uint16_t COL_BLACK    = 0x0000;
 
 #define HDR_H 16
 
-// Option rows on the question screen: 4 rows of 17px.
+// =====================================================
+// QUESTION VIEW (scrollable)
+//
+// The question screen is one scrollable "document":
+//   header 0..16   -> "Q n/total" + clock (+ link icon)
+//   viewport 18..110 -> wrapped question text + options
+//   footer 112..127 -> key hints, answer chip, OFFLINE,
+//                      more-content-above/below arrows
+// =====================================================
 
-#define OPT_Y(i) (51 + (i) * 19)
-#define OPT_H    17
+#define QVIEW_Y0   18
+#define QVIEW_Y1   110
+#define QVIEW_H    (QVIEW_Y1 - QVIEW_Y0 + 1)
+#define QFOOT_Y    112
+
+// Keypad scroll step: ~2 text rows (10px each) per press.
+#define SCROLL_STEP_PX 20
+
+// Classic 5x7 GFX font at size 1: every char is 6px wide.
+// Line capacity is derived from this metric, never from a
+// fixed character count.
+#define CHAR_W        6
+#define Q_TEXT_X      5
+#define Q_TEXT_MAX_PX 150      // 160 - 2*5 margin
+#define O_TEXT_X      24
+#define O_TEXT_MAX_PX 130      // 24..154, right of the badge
+
+// Document rows (wrapped lines). 400-char questions +
+// 4x160-char options wrap to ~57 rows; the budget below has
+// headroom, and an overflow marker row is shown if exceeded
+// (content is never dropped silently).
+#define MAX_DOC_ROWS 66
+
+// Fragmented QUESTION transfer (see gateway send_ack.py):
+// QBEGIN announces the total byte count, following writes are
+// raw payload appended until the count is reached.
+#define FRAG_BUF_SIZE   2048
+#define FRAG_TIMEOUT_MS 6000
 
 // =====================================================
 // KEYPAD 4x4
@@ -164,6 +208,39 @@ String qB = "";
 String qC = "";
 String qD = "";
 
+// Scrollable question document (built from qText/qA..qD).
+
+enum DocRowKind : uint8_t {
+    ROW_QTEXT,      // question text line          (10px)
+    ROW_GAP,        // vertical spacing            (8px)
+    ROW_OPT_HEAD,   // option first line: badge+text (15px)
+    ROW_OPT_CONT,   // option continuation line    (10px)
+    ROW_MARK        // visible overflow marker     (10px)
+};
+
+struct DocRow {
+    uint8_t kind;
+    uint8_t opt;    // 0..3 for option rows, 255 otherwise
+    String text;
+};
+
+DocRow docRows[MAX_DOC_ROWS];
+int docRowCount = 0;
+bool docOverflow = false;
+int docHeightPx = 0;
+int scrollPx = 0;
+int maxScrollPx = 0;
+bool questionDocReady = false;
+
+// Fragmented QUESTION transfer state (BLE callback side).
+
+volatile bool questionReceiving = false;
+volatile bool pendingQBegin = false;
+bool showingReceiving = false;
+volatile unsigned long fragStartedAt = 0;
+int fragExpectedBytes = 0;
+String fragBuf = "";
+
 // Whole-quiz countdown.
 
 unsigned long quizDeadline = 0;
@@ -200,6 +277,24 @@ int activeQuizID = 0;
 
 unsigned long registerSentAt = 0;
 unsigned long answerSentAt = 0;
+
+// Answer sequencing + retry.
+//
+// Every answering attempt gets a rising `sequence` number.
+// Automatic retries of the same attempt (ACK lost over BLE)
+// REUSE the number, so the backend can tell a retry apart
+// from a later re-answer:
+//
+//   same sequence   -> duplicate delivery, keep stored answer
+//   higher sequence -> newer attempt, overwrites the old one
+//   lower sequence  -> stale delayed packet, ignored
+//
+// The counter never resets, so it also orders attempts across
+// questions for the whole session.
+
+uint32_t answerSeq = 0;
+uint8_t answerAttempts = 0;
+const uint8_t MAX_ANSWER_ATTEMPTS = 3;
 
 // UI bookkeeping.
 
@@ -289,14 +384,78 @@ String jsonGetString(
 
     start += pattern.length();
 
-    int end = packet.indexOf("\"", start);
+    // The value may contain escaped quotes (\"), so skip
+    // backslash-escaped characters while searching for the
+    // real closing quote.
+    int end = start;
+    int n = (int)packet.length();
 
-    if (end <= start)
+    while (end < n)
+    {
+        char c = packet.charAt(end);
+
+        if (c == '\\' && end + 1 < n)
+        {
+            end += 2;
+            continue;
+        }
+
+        if (c == '"')
+        {
+            break;
+        }
+
+        end++;
+    }
+
+    if (end <= start || end > n)
     {
         return "";
     }
 
-    return packet.substring(start, end);
+    // Decode the escapes json.dumps can produce in question
+    // text: \" \\ \n \t \r. \uXXXX is NOT decoded — the
+    // gateway transliterates non-ASCII to plain ASCII before
+    // sending (the classic GFX font has no Vietnamese
+    // glyphs).
+    String out = "";
+
+    out.reserve(end - start);
+
+    for (int i = start; i < end; i++)
+    {
+        char c = packet.charAt(i);
+
+        if (c == '\\' && i + 1 < end)
+        {
+            char e = packet.charAt(i + 1);
+
+            if (e == 'n')
+            {
+                out += '\n';
+            }
+            else if (e == 't')
+            {
+                out += '\t';
+            }
+            else if (e == 'r')
+            {
+                out += '\r';
+            }
+            else
+            {
+                out += e;
+            }
+
+            i++;
+        }
+        else
+        {
+            out += c;
+        }
+    }
+
+    return out;
 }
 
 long jsonGetInt(
@@ -367,7 +526,11 @@ void drawJoinedScreen();
 void drawQuizInfoScreen();
 void runStartCountdown();
 void drawQuestionScreen();
-void highlightOption(char choice);
+void buildQuestionDoc();
+void renderQuestionContent();
+void renderQuestionFooter();
+void drawReceivingScreen();
+void applyQuestionPacket(const String& packet);
 void drawSendingAnswerScreen();
 void drawAnswerConfirmedScreen();
 void drawNextQuestionScreen();
@@ -472,7 +635,60 @@ class ACKCallbacks : public BLECharacteristicCallbacks
 };
 
 // =====================================================
+// QUESTION PACKET PARSER
+// (shared by the single-shot and fragmented paths)
+// =====================================================
+
+void applyQuestionPacket(const String& packet)
+{
+    currentQuestionID =
+        jsonGetString(packet, "question_id");
+
+    long number = jsonGetInt(packet, "number");
+    long total = jsonGetInt(packet, "total");
+
+    if (number > 0)
+    {
+        currentQuestionNumber = (int)number;
+    }
+    else if (currentQuestionID.length() > 0)
+    {
+        currentQuestionNumber =
+            currentQuestionID.substring(1).toInt();
+    }
+
+    if (total > 0)
+    {
+        questionTotal = (int)total;
+    }
+
+    qText = jsonGetString(packet, "question");
+    qA = jsonGetString(packet, "A");
+    qB = jsonGetString(packet, "B");
+    qC = jsonGetString(packet, "C");
+    qD = jsonGetString(packet, "D");
+
+    if (currentQuestionID.length() == 0)
+    {
+        return;
+    }
+
+    pendingQuestion = true;
+}
+
+// =====================================================
 // QUESTION CALLBACK
+//
+// Long questions arrive fragmented (a single BLE write is
+// capped by the negotiated MTU):
+//
+//   {"type":"QBEGIN","bytes":512,"chunks":3}   -> begin
+//   <raw chunk 1> ... <raw chunk N>            -> append
+//
+// The chunks concatenated equal the full QUESTION JSON; the
+// transfer self-completes when the announced byte count is
+// reached, and a timeout abandons a stalled transfer (the
+// gateway re-pushes the question after a reconnect).
 // =====================================================
 
 class QuestionCallbacks : public BLECharacteristicCallbacks
@@ -486,39 +702,67 @@ class QuestionCallbacks : public BLECharacteristicCallbacks
         Serial.println(packet);
         Serial.println("==============================");
 
-        currentQuestionID =
-            jsonGetString(packet, "question_id");
-
-        long number = jsonGetInt(packet, "number");
-        long total = jsonGetInt(packet, "total");
-
-        if (number > 0)
+        if (questionReceiving)
         {
-            currentQuestionNumber = (int)number;
-        }
-        else if (currentQuestionID.length() > 0)
-        {
-            currentQuestionNumber =
-                currentQuestionID.substring(1).toInt();
-        }
+            if ((int)(fragBuf.length() + packet.length()) >
+                FRAG_BUF_SIZE)
+            {
+                Serial.println(
+                    "[QFRAG] Buffer overflow - dropped."
+                );
 
-        if (total > 0)
-        {
-            questionTotal = (int)total;
-        }
+                questionReceiving = false;
+                fragBuf = "";
 
-        qText = jsonGetString(packet, "question");
-        qA = jsonGetString(packet, "A");
-        qB = jsonGetString(packet, "B");
-        qC = jsonGetString(packet, "C");
-        qD = jsonGetString(packet, "D");
+                return;
+            }
 
-        if (currentQuestionID.length() == 0)
-        {
+            fragBuf += packet;
+
+            if ((int)fragBuf.length() >= fragExpectedBytes)
+            {
+                String whole = fragBuf;
+
+                questionReceiving = false;
+                fragBuf = "";
+
+                Serial.println(
+                    "[QFRAG] Transfer complete - parsing."
+                );
+
+                applyQuestionPacket(whole);
+            }
+
             return;
         }
 
-        pendingQuestion = true;
+        if (jsonGetString(packet, "type") == "QBEGIN")
+        {
+            long bytes = jsonGetInt(packet, "bytes");
+
+            if (bytes <= 0 || bytes > FRAG_BUF_SIZE)
+            {
+                Serial.println(
+                    "[QFRAG] Invalid QBEGIN - ignored."
+                );
+
+                return;
+            }
+
+            fragBuf = "";
+            fragExpectedBytes = (int)bytes;
+            fragStartedAt = millis();
+            questionReceiving = true;
+            pendingQBegin = true;
+
+            Serial.print("[QFRAG] Expecting ");
+            Serial.print(bytes);
+            Serial.println(" bytes.");
+
+            return;
+        }
+
+        applyQuestionPacket(packet);
     }
 };
 
@@ -599,52 +843,6 @@ void drawTitleAuto(
         ((int)strlen(text) * 12 <= 152) ? 2 : 1;
 
     printCentered(text, y, size, color);
-}
-
-void drawWrappedText(
-    const String& text,
-    int x,
-    int y,
-    int maxY,
-    int maxCharsPerLine
-)
-{
-    String remaining = text;
-
-    while (remaining.length() > 0 && y < maxY)
-    {
-        int lineLength = maxCharsPerLine;
-
-        if ((int)remaining.length() < lineLength)
-        {
-            lineLength = remaining.length();
-        }
-
-        if (lineLength < (int)remaining.length())
-        {
-            int spacePos =
-                remaining.lastIndexOf(' ', lineLength);
-
-            if (spacePos > 0)
-            {
-                lineLength = spacePos;
-            }
-        }
-
-        String line =
-            remaining.substring(0, lineLength);
-
-        line.trim();
-
-        tft.setCursor(x, y);
-        tft.println(line);
-
-        remaining = remaining.substring(lineLength);
-
-        remaining.trim();
-
-        y += 10;
-    }
 }
 
 void drawWrappedCentered(
@@ -731,37 +929,86 @@ void drawRingArc(
     }
 }
 
-// Broadcast waves opening upward (also used as the wifi
-// icon and the header BLE icon).
-void drawBroadcastArcs(
+// One wave stroke of the signal icon, drawn on both sides
+// of the center: an arc bulging outward and spanning about
+// +/-50 degrees around the horizontal. Multiple stroke
+// passes fatten the line like the reference icon.
+void drawWaveArcPair(
     int cx,
     int cy,
     int r,
+    int stroke,
     uint16_t color
 )
 {
     for (int side = -1; side <= 1; side += 2)
     {
-        int px = 0;
-        int py = 0;
-
-        for (int a = -50; a <= 50; a += 5)
+        for (int s = 0; s < stroke; s++)
         {
-            float rad = a * 3.14159f / 180.0f;
+            int rr = r - s;
 
-            int x = cx + side *
-                (int)(r * cos(rad) + 0.5f);
+            int px = 0;
+            int py = 0;
 
-            int y = cy -
-                (int)(r * sin(rad) + 0.5f);
-
-            if (a > -50)
+            for (int a = -50; a <= 50; a += 5)
             {
-                tft.drawLine(px, py, x, y, color);
-            }
+                float rad = a * 3.14159f / 180.0f;
 
-            px = x;
-            py = y;
+                int x = cx + side *
+                    (int)(rr * cos(rad) + 0.5f);
+
+                int y = cy -
+                    (int)(rr * sin(rad) + 0.5f);
+
+                if (a > -50)
+                {
+                    tft.drawLine(px, py, x, y, color);
+                }
+
+                px = x;
+                py = y;
+            }
+        }
+    }
+}
+
+// Signal-wave status icon: a center dot with two nested
+// waves on each side. off = true adds the diagonal slash
+// (bottom-left up to top-right) that marks a lost link.
+void drawSignalWaves(
+    int cx,
+    int cy,
+    int outerR,
+    uint16_t color,
+    bool off
+)
+{
+    int innerR = (2 * outerR + 1) / 3;
+    int dotR = (outerR + 1) / 3;
+    int stroke = outerR >= 10 ? 2 : 1;
+
+    tft.fillCircle(cx, cy, dotR, color);
+
+    drawWaveArcPair(cx, cy, innerR, stroke, color);
+    drawWaveArcPair(cx, cy, outerR, stroke, color);
+
+    if (off)
+    {
+        int v = (outerR * 77 + 50) / 100;
+
+        tft.drawLine(
+            cx - outerR, cy + v,
+            cx + outerR, cy - v,
+            color
+        );
+
+        if (stroke > 1)
+        {
+            tft.drawLine(
+                cx - outerR, cy + v + 1,
+                cx + outerR, cy - v + 1,
+                color
+            );
         }
     }
 }
@@ -841,15 +1088,7 @@ void drawClockBig(int cx, int cy, int r, uint16_t color)
 
 void drawWifiLost(int cx, int cy)
 {
-    tft.fillCircle(cx, cy + 4, 3, COL_RED);
-
-    drawBroadcastArcs(cx, cy + 4, 8, COL_RED);
-    drawBroadcastArcs(cx, cy + 4, 7, COL_RED);
-    drawBroadcastArcs(cx, cy + 4, 13, COL_RED);
-    drawBroadcastArcs(cx, cy + 4, 12, COL_RED);
-
-    tft.drawLine(cx - 16, cy - 16, cx + 16, cy + 10, COL_RED);
-    tft.drawLine(cx - 16, cy - 15, cx + 16, cy + 11, COL_RED);
+    drawSignalWaves(cx, cy, 13, COL_WHITE, true);
 }
 
 void drawHourglass(int cx, int cy)
@@ -972,13 +1211,11 @@ void drawAppHeader(const char* title)
     tft.setCursor(5, 4);
     tft.print(title);
 
-    uint16_t iconColor =
-        gatewayConnected ? COL_WHITE : COL_DIM;
-
-    tft.fillCircle(147, 11, 2, iconColor);
-
-    drawBroadcastArcs(147, 11, 4, iconColor);
-    drawBroadcastArcs(147, 11, 7, iconColor);
+    // Plain waves while linked, slashed waves while down.
+    // cy = 10 keeps the whole glyph inside the 16px header.
+    drawSignalWaves(
+        147, 10, 7, COL_WHITE, !gatewayConnected
+    );
 }
 
 // Dark header of the question screen: "Q n/total" left,
@@ -1010,6 +1247,14 @@ void drawQuestionHeader()
     tft.setTextColor(COL_WHITE);
     tft.setCursor(5, 4);
     tft.print(buf);
+
+    // Link status where space permits: the slashed icon only
+    // appears while the gateway link is DOWN (the question
+    // number and clock already crowd this 16px bar).
+    if (!gatewayConnected)
+    {
+        drawSignalWaves(108, 9, 6, COL_RED, true);
+    }
 }
 
 void drawButton(
@@ -1409,88 +1654,419 @@ void runStartCountdown()
 }
 
 // =====================================================
-// SCREEN 7: QUESTION
+// SCREEN 7: QUESTION (scrollable document)
 // =====================================================
 
-void drawOptionRow(int index, bool selected)
+int docRowHeight(uint8_t kind)
 {
+    switch (kind)
+    {
+        case ROW_OPT_HEAD: return 15;
+        case ROW_GAP:      return 8;
+        default:           return 10;
+    }
+}
+
+void appendDocRow(uint8_t kind, uint8_t opt, const String& text)
+{
+    if (docRowCount >= MAX_DOC_ROWS)
+    {
+        docOverflow = true;
+        return;
+    }
+
+    DocRow& row = docRows[docRowCount++];
+
+    row.kind = kind;
+    row.opt = opt;
+    row.text = text;
+}
+
+// Word-wrap `text` into document rows at most maxPx wide.
+// Breaks at spaces, honors hard '\n' from the teacher's
+// input, and splits any word longer than a full line (never
+// loops forever). opt == 255 wraps question text; otherwise
+// the first wrapped line becomes the option's badge row.
+void appendWrapped(const String& text, int maxPx, uint8_t opt)
+{
+    int maxChars = maxPx / CHAR_W;
+
+    if (maxChars < 1)
+    {
+        maxChars = 1;
+    }
+
+    int i = 0;
+    int n = (int)text.length();
+    bool first = true;
+
+    while (i < n)
+    {
+        int end = i;
+        int hardBreak = -1;
+
+        while (end < n && (end - i) < maxChars)
+        {
+            char c = text.charAt(end);
+
+            if (c == '\n')
+            {
+                hardBreak = end;
+                break;
+            }
+
+            end++;
+        }
+
+        String line;
+        int next;
+
+        if (hardBreak >= 0)
+        {
+            line = text.substring(i, hardBreak);
+            next = hardBreak + 1;
+        }
+        else if (end >= n)
+        {
+            line = text.substring(i, n);
+            next = n;
+        }
+        else
+        {
+            int sp = text.lastIndexOf(' ', end - 1);
+
+            if (sp >= i)
+            {
+                line = text.substring(i, sp);
+                next = sp + 1;
+            }
+            else if (text.charAt(end) == ' ')
+            {
+                line = text.substring(i, end);
+                next = end + 1;
+            }
+            else
+            {
+                // Inside a word longer than one line: split it.
+                line = text.substring(i, end);
+                next = end;
+            }
+        }
+
+        while (line.length() > 0 && line.charAt(0) == ' ')
+        {
+            line.remove(0, 1);
+        }
+
+        if (line.length() > 0)
+        {
+            if (opt == 255)
+            {
+                appendDocRow(ROW_QTEXT, 255, line);
+            }
+            else
+            {
+                appendDocRow(
+                    first ? ROW_OPT_HEAD : ROW_OPT_CONT,
+                    opt,
+                    line
+                );
+            }
+
+            first = false;
+        }
+
+        i = next;
+    }
+}
+
+// Turn the current qText/qA..qD into scrollable rows. All
+// received text is preserved — nothing is truncated to fit
+// the screen; extra content is reached by scrolling.
+void buildQuestionDoc()
+{
+    docRowCount = 0;
+    docOverflow = false;
+    scrollPx = 0;
+
+    if (qText.length() == 0 &&
+        qA.length() == 0 &&
+        qB.length() == 0 &&
+        qC.length() == 0 &&
+        qD.length() == 0)
+    {
+        questionDocReady = false;
+        docHeightPx = 0;
+        maxScrollPx = 0;
+        return;
+    }
+
+    appendWrapped(qText, Q_TEXT_MAX_PX, 255);
+
+    appendDocRow(ROW_GAP, 255, "");
+
     const String options[4] = {qA, qB, qC, qD};
 
-    int y = OPT_Y(index);
+    for (int i = 0; i < 4; i++)
+    {
+        appendWrapped(options[i], O_TEXT_MAX_PX, i);
 
+        if (i < 3)
+        {
+            appendDocRow(ROW_GAP, 255, "");
+        }
+    }
+
+    if (docOverflow)
+    {
+        // Make room for the visible "cut" marker by dropping
+        // the last wrapped line (the marker says content was
+        // longer than the buffer — never a silent cut).
+        if (docRowCount >= MAX_DOC_ROWS)
+        {
+            docRowCount = MAX_DOC_ROWS - 1;
+        }
+
+        appendDocRow(ROW_MARK, 255, "!");
+    }
+
+    docHeightPx = 0;
+
+    for (int r = 0; r < docRowCount; r++)
+    {
+        docHeightPx += docRowHeight(docRows[r].kind);
+    }
+
+    maxScrollPx = docHeightPx - QVIEW_H;
+
+    if (maxScrollPx < 0)
+    {
+        maxScrollPx = 0;
+    }
+
+    questionDocReady = true;
+}
+
+void drawOptionBadge(int x, int y, int opt, bool selected)
+{
     if (selected)
     {
-        tft.fillRoundRect(
-            3, y, 154, OPT_H, 4, COL_PANEL_LT
-        );
-
-        tft.drawRoundRect(3, y, 154, OPT_H, 4, COL_CYAN);
-        tft.drawRoundRect(4, y + 1, 152, OPT_H - 2, 3, COL_CYAN);
-
-        tft.fillRoundRect(7, y + 2, 13, 13, 3, COL_CYAN);
-
-        tft.setTextSize(1);
+        tft.fillRoundRect(x, y, 13, 13, 3, COL_CYAN);
         tft.setTextColor(COL_BG);
-        tft.setCursor(10, y + 4);
-        tft.print((char)('A' + index));
     }
     else
     {
-        tft.fillRoundRect(3, y, 154, OPT_H, 4, COL_PANEL);
-
-        tft.fillRoundRect(7, y + 2, 13, 13, 3, COL_HEADER);
-
-        tft.setTextSize(1);
+        tft.fillRoundRect(x, y, 13, 13, 3, COL_HEADER);
         tft.setTextColor(COL_WHITE);
-        tft.setCursor(10, y + 4);
-        tft.print((char)('A' + index));
     }
 
-    tft.setTextColor(COL_WHITE);
-    tft.setCursor(24, y + 5);
+    tft.setTextSize(1);
+    tft.setCursor(x + 3, y + 3);
+    tft.print((char)('A' + opt));
+}
 
-    const String& text = options[index];
+bool isOptionLastRow(int r)
+{
+    return r + 1 >= docRowCount ||
+           docRows[r + 1].opt != docRows[r].opt;
+}
 
-    if ((int)text.length() > 22)
+// Draw the visible slice of the document. Rows are only
+// drawn when they fit FULLY inside the viewport (GFX text
+// cannot be clipped to a box), so a partially visible row at
+// either edge waits for the next scroll step.
+void renderQuestionContent()
+{
+    tft.fillRect(0, QVIEW_Y0, 160, QVIEW_H, COL_BG);
+
+    int y = QVIEW_Y0 - scrollPx;
+
+    for (int r = 0; r < docRowCount; r++)
     {
-        tft.print(text.substring(0, 19));
-        tft.print("...");
+        DocRow& row = docRows[r];
+
+        int h = docRowHeight(row.kind);
+        int top = y;
+        int bottom = y + h;
+
+        y += h;
+
+        if (top < QVIEW_Y0 || bottom > QVIEW_Y1 + 1)
+        {
+            continue;
+        }
+
+        bool selected =
+            row.opt < 4 &&
+            lastAnswerChoice == (char)('A' + row.opt);
+
+        if (row.kind == ROW_QTEXT)
+        {
+            tft.setTextSize(1);
+            tft.setTextColor(COL_WHITE);
+            tft.setCursor(Q_TEXT_X, top);
+            tft.print(row.text);
+        }
+        else if (row.kind == ROW_MARK)
+        {
+            tft.setTextSize(1);
+            tft.setTextColor(COL_RED);
+            tft.setCursor(Q_TEXT_X, top);
+            tft.print(">>");
+        }
+        else if (row.kind == ROW_OPT_HEAD ||
+                 row.kind == ROW_OPT_CONT)
+        {
+            if (selected)
+            {
+                tft.fillRect(
+                    3, top, 154, h, COL_PANEL_LT
+                );
+            }
+
+            if (row.kind == ROW_OPT_HEAD)
+            {
+                drawOptionBadge(6, top + 1, row.opt, selected);
+
+                tft.setTextSize(1);
+                tft.setTextColor(
+                    selected ? COL_CYAN : COL_WHITE
+                );
+                tft.setCursor(O_TEXT_X, top + 4);
+                tft.print(row.text);
+            }
+            else
+            {
+                tft.setTextSize(1);
+                tft.setTextColor(
+                    selected ? COL_CYAN : COL_WHITE
+                );
+                tft.setCursor(O_TEXT_X, top);
+                tft.print(row.text);
+            }
+
+            if (selected)
+            {
+                // Bracket the whole option block with cyan
+                // rails so the selection stays visible across
+                // every scroll position.
+                tft.drawFastVLine(2, top, h, COL_CYAN);
+                tft.drawFastVLine(157, top, h, COL_CYAN);
+
+                if (row.kind == ROW_OPT_HEAD)
+                {
+                    tft.drawFastHLine(
+                        2, top, 156, COL_CYAN
+                    );
+                }
+
+                if (isOptionLastRow(r))
+                {
+                    tft.drawFastHLine(
+                        2, bottom - 1, 156, COL_CYAN
+                    );
+                }
+            }
+        }
+    }
+}
+
+// Footer: key hints, the chosen answer, an OFFLINE flag when
+// the gateway link is down, and up/down arrows whenever more
+// content sits above/below the viewport.
+void renderQuestionFooter()
+{
+    tft.fillRect(0, QFOOT_Y, 160, 128 - QFOOT_Y, COL_BG);
+    tft.drawFastHLine(0, QFOOT_Y, 160, COL_PANEL_LT);
+
+    tft.setTextSize(1);
+
+    if (gatewayConnected)
+    {
+        tft.setTextColor(COL_DIM);
+        tft.setCursor(5, 116);
+        tft.print("2:up 8:down");
+
+        if (lastAnswerChoice >= 'A' &&
+            lastAnswerChoice <= 'D')
+        {
+            tft.setTextColor(COL_YELLOW);
+            tft.setCursor(104, 116);
+            tft.print("Ans:");
+            tft.print(lastAnswerChoice);
+        }
     }
     else
     {
-        tft.print(text);
+        tft.setTextColor(COL_RED);
+        tft.setCursor(5, 116);
+        tft.print("OFFLINE");
+    }
+
+    if (maxScrollPx > 0)
+    {
+        if (scrollPx > 0)
+        {
+            tft.fillTriangle(
+                148, 117, 154, 117, 151, 113, COL_CYAN
+            );
+        }
+
+        if (scrollPx < maxScrollPx)
+        {
+            tft.fillTriangle(
+                148, 120, 154, 120, 151, 124, COL_CYAN
+            );
+        }
     }
 }
 
 void drawQuestionScreen()
 {
+    if (!questionDocReady)
+    {
+        // Question not fully received yet.
+        drawReceivingScreen();
+
+        lastClockPaint = 0;
+
+        return;
+    }
+
     tft.fillScreen(COL_BG);
 
     drawQuestionHeader();
 
-    tft.setTextSize(1);
-    tft.setTextColor(COL_WHITE);
+    renderQuestionContent();
 
-    drawWrappedText(qText, 5, 21, 49, 26);
-
-    for (int i = 0; i < 4; i++)
-    {
-        drawOptionRow(i, false);
-    }
+    renderQuestionFooter();
 
     lastClockPaint = 0;
 }
 
-void highlightOption(char choice)
+// =====================================================
+// SCREEN 7b: RECEIVING QUESTION (fragmented transfer)
+// =====================================================
+
+void drawReceivingScreen()
 {
-    int index = choice - 'A';
+    tft.fillScreen(COL_BG);
 
-    if (index < 0 || index > 3)
-    {
-        return;
-    }
+    drawAppHeader("PulseNet");
 
-    drawOptionRow(index, true);
+    drawDocIcon(75, 20, COL_CYAN);
+
+    drawSpinnerFrame(80, 46, 14, 0);
+
+    drawTitleAuto("Receiving...", 70, COL_WHITE);
+
+    drawWrappedCentered(
+        "Downloading question data.",
+        94,
+        24,
+        COL_GRAY,
+        2
+    );
 }
 
 // =====================================================
@@ -1819,7 +2395,9 @@ bool sendRegistration()
         "\"student_id\":\"" +
         studentID +
         "\","
-        "\"device_name\":\"" DEVICE_NAME "\","
+        "\"device_name\":\"" +
+        String(deviceName) +
+        "\","
         "\"device_mac\":\"" +
         macAddress +
         "\"}";
@@ -1846,6 +2424,14 @@ bool sendAnswer(char answer)
         return false;
     }
 
+    // First attempt gets a fresh sequence number; automatic
+    // retries reuse the current one (see the timeout handler
+    // in loop()).
+    if (answerAttempts == 0)
+    {
+        answerSeq++;
+    }
+
     String packet =
         "{\"type\":\"ANSWER\","
         "\"student_id\":\"" +
@@ -1856,7 +2442,10 @@ bool sendAnswer(char answer)
         "\","
         "\"answer\":\"" +
         String(answer) +
-        "\"}";
+        "\","
+        "\"sequence\":" +
+        String((unsigned long)answerSeq) +
+        "}";
 
     Serial.print("TX: ");
     Serial.println(packet);
@@ -1865,6 +2454,7 @@ bool sendAnswer(char answer)
     answerCharacteristic->notify();
 
     answerSentAt = millis();
+    answerAttempts++;
 
     return true;
 }
@@ -1979,8 +2569,12 @@ void handleQuizInfo()
 
         entryOpen = false;
 
+        // Devices that have NOT joined yet (still typing the
+        // student ID in the lobby) stay in the lobby: their
+        // answers would be rejected until they register.
+        // After REGISTER_ACK the gateway pushes the current
+        // question and pendingQuestion moves them on.
         if (state == STATE_LOGO ||
-            state == STATE_LOBBY ||
             state == STATE_JOINED ||
             state == STATE_RESULT)
         {
@@ -2136,6 +2730,11 @@ void handleAck()
 
     if (ackType == "ANSWER_ACK")
     {
+        // Any final verdict ends the retry cycle for this
+        // answer (a duplicate ACK for the same question is
+        // filtered by the counters below).
+        answerAttempts = 0;
+
         if (ackStatus == "ACCEPTED")
         {
             // Count each question at most once. The gateway
@@ -2238,13 +2837,25 @@ void setupBLE()
     Serial.println();
     Serial.println("Starting BLE...");
 
-    BLEDevice::init(DEVICE_NAME);
+    uint8_t btMac[6];
+
+    esp_read_mac(btMac, ESP_MAC_BT);
+
+    snprintf(
+        deviceName,
+        sizeof(deviceName),
+        DEVICE_NAME_PREFIX "-%02X%02X",
+        btMac[4],
+        btMac[5]
+    );
+
+    BLEDevice::init(deviceName);
 
     String macAddress =
         BLEDevice::getAddress().toString().c_str();
 
     Serial.print("Device Name : ");
-    Serial.println(DEVICE_NAME);
+    Serial.println(deviceName);
 
     Serial.print("BLE MAC     : ");
     Serial.println(macAddress);
@@ -2411,9 +3022,19 @@ void loop()
             // Idle screen: just refresh the header icon.
             drawIdleWaitScreen();
         }
-        else if (state != STATE_RESULT)
+        else if (state == STATE_QUESTION)
         {
-            // Keep the final score on screen; otherwise
+            // Keep the question content on screen; the header
+            // icon and the OFFLINE footer flag the lost link.
+            drawQuestionHeader();
+            drawQuizClock(true);
+            renderQuestionFooter();
+        }
+        else if (
+            state != STATE_ANSWER_SENT &&
+            state != STATE_RESULT)
+        {
+            // Keep the final score / sending screen; otherwise
             // show the connection-lost screen.
             drawConnectionLostScreen();
         }
@@ -2438,6 +3059,23 @@ void loop()
         handleQuizInfo();
     }
 
+    if (pendingQBegin)
+    {
+        pendingQBegin = false;
+
+        // A fragmented question is arriving: show the
+        // receiving status on the screens where it makes
+        // sense (the lobby ID entry keeps its own screen).
+        if (state == STATE_QUESTION ||
+            state == STATE_WAIT_QUESTION ||
+            state == STATE_ANSWER_SENT)
+        {
+            showingReceiving = true;
+
+            drawReceivingScreen();
+        }
+    }
+
     if (pendingQuestion)
     {
         pendingQuestion = false;
@@ -2450,7 +3088,12 @@ void loop()
         Serial.print("New question: ");
         Serial.println(currentQuestionID);
 
+        answerAttempts = 0;
+        showingReceiving = false;
+
         state = STATE_QUESTION;
+
+        buildQuestionDoc();
 
         drawQuestionScreen();
         drawQuizClock(true);
@@ -2508,11 +3151,18 @@ void loop()
 
             drawSpinnerFrame(80, 46, 14, spinnerAngle);
         }
-        else if (state == STATE_ANSWER_SENT)
+        else if (state == STATE_ANSWER_SENT &&
+                 !showingReceiving)
         {
             spinnerAngle = (spinnerAngle + 25) % 360;
 
             drawSpinnerFrame(80, 44, 21, spinnerAngle);
+        }
+        else if (showingReceiving)
+        {
+            spinnerAngle = (spinnerAngle + 25) % 360;
+
+            drawSpinnerFrame(80, 46, 14, spinnerAngle);
         }
     }
 
@@ -2559,6 +3209,31 @@ void loop()
     // 4. Timeouts
     // -------------------------------------------------
 
+    // A fragmented question that stalls mid-transfer is
+    // abandoned; the gateway re-pushes the whole question
+    // after a reconnect (or on its next poll).
+    if (questionReceiving &&
+        millis() - fragStartedAt > FRAG_TIMEOUT_MS)
+    {
+        questionReceiving = false;
+        fragBuf = "";
+
+        Serial.println(
+            "[QFRAG] Timeout - transfer abandoned."
+        );
+
+        if (showingReceiving)
+        {
+            showingReceiving = false;
+
+            if (state == STATE_QUESTION)
+            {
+                drawQuestionScreen();
+                drawQuizClock(true);
+            }
+        }
+    }
+
     if (state == STATE_REGISTERING &&
         millis() - registerSentAt > 6000)
     {
@@ -2586,16 +3261,31 @@ void loop()
     if (state == STATE_ANSWER_SENT &&
         millis() - answerSentAt > 5000)
     {
-        if (deviceConnected)
+        if (deviceConnected &&
+            answerAttempts < MAX_ANSWER_ATTEMPTS &&
+            currentQuestionID.length() > 0)
         {
+            // ACK lost: resend the SAME answer with the SAME
+            // sequence — the backend treats it as a retry and
+            // returns the stored answer instead of saving a
+            // second one.
+            sendAnswer(lastAnswerChoice);
+
+            // Stay in STATE_ANSWER_SENT; the spinner keeps
+            // running while the gateway replies.
+        }
+        else
+        {
+            // Back to the question screen. If the link is
+            // down the content is still shown, with the
+            // OFFLINE flag in the footer and header.
             drawQuestionScreen();
             drawQuizClock(true);
-        }
-        // While disconnected the connection-lost screen
-        // stays up; the question is repainted on
-        // reconnect (see the ACK CONNECTED handler).
 
-        state = STATE_QUESTION;
+            answerAttempts = 0;
+
+            state = STATE_QUESTION;
+        }
     }
 
     // -------------------------------------------------
@@ -2690,15 +3380,58 @@ void loop()
             }
         }
 
-        // ----- Question: answer -----
+        // ----- Question: scroll + answer -----
 
         else if (state == STATE_QUESTION)
         {
-            if (key >= 'A' && key <= 'D')
+            if (questionReceiving || showingReceiving)
+            {
+                // A new question is mid-download — keys are
+                // ignored until it completes (or times out).
+            }
+            else if (key == '2' || key == '8')
+            {
+                // Scroll: clamped at both ends, so pressing
+                // '2' at the top and '8' at the bottom just
+                // holds the position.
+                if (maxScrollPx > 0)
+                {
+                    int before = scrollPx;
+
+                    if (key == '2')
+                    {
+                        scrollPx -= SCROLL_STEP_PX;
+                    }
+                    else
+                    {
+                        scrollPx += SCROLL_STEP_PX;
+                    }
+
+                    if (scrollPx < 0)
+                    {
+                        scrollPx = 0;
+                    }
+
+                    if (scrollPx > maxScrollPx)
+                    {
+                        scrollPx = maxScrollPx;
+                    }
+
+                    if (scrollPx != before)
+                    {
+                        renderQuestionContent();
+                        renderQuestionFooter();
+                    }
+                }
+            }
+            else if (key >= 'A' && key <= 'D')
             {
                 lastAnswerChoice = key;
 
-                highlightOption(key);
+                // Selection is part of the document render, so
+                // it survives any later scrolling.
+                renderQuestionContent();
+                renderQuestionFooter();
 
                 if (sendAnswer(key))
                 {
