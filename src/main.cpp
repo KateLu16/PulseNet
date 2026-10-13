@@ -110,15 +110,15 @@ const uint16_t COL_BLACK    = 0x0000;
 // KEYPAD 4x4
 // =====================================================
 
-#define ROW1 13
-#define ROW2 12
-#define ROW3 14
-#define ROW4 27
+#define ROW1 26
+#define ROW2 25
+#define ROW3 33
+#define ROW4 32
 
-#define COL1 26
-#define COL2 25
-#define COL3 33
-#define COL4 32
+#define COL1 13
+#define COL2 12
+#define COL3 14
+#define COL4 27
 
 const uint8_t rowPins[4] = {
     ROW1, ROW2, ROW3, ROW4
