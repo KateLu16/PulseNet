@@ -23,6 +23,11 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
+from app.schemas.question import (
+    OPTION_MAX_LENGTH,
+    QUESTION_TEXT_MAX_LENGTH,
+)
+
 from dotenv import load_dotenv
 
 # backend/.env sits two levels above app/services/
@@ -214,6 +219,7 @@ Rules:
 - Wrong options must be plausible, not absurd.
 - Do not copy whole sentences from the document into the question text.
 - Spread correct answers across A, B, C, D instead of repeating one letter.
+- Questions are read on a small scrolling display: keep question_text under {QUESTION_TEXT_MAX_LENGTH} characters and each option under {OPTION_MAX_LENGTH} characters.
 - {language_rule}
 
 Return ONLY a JSON array (no markdown, no commentary). Each element must be:
@@ -451,11 +457,14 @@ def _normalize_question(item) -> dict | None:
     if correct_answer not in VALID_ANSWERS:
         return None
 
+    # Hard cap at the device display budget (the prompt asks
+    # for shorter text; this guarantees the limit even if the
+    # model ignores it).
     return {
-        "question_text": question_text,
-        "option_a": option_a,
-        "option_b": option_b,
-        "option_c": option_c,
-        "option_d": option_d,
+        "question_text": question_text[:QUESTION_TEXT_MAX_LENGTH],
+        "option_a": option_a[:OPTION_MAX_LENGTH],
+        "option_b": option_b[:OPTION_MAX_LENGTH],
+        "option_c": option_c[:OPTION_MAX_LENGTH],
+        "option_d": option_d[:OPTION_MAX_LENGTH],
         "correct_answer": correct_answer,
     }

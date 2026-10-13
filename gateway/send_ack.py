@@ -1,21 +1,60 @@
+"""
+PulseNet BLE Gateway (multi-device).
+
+One Raspberry Pi bridges MANY student devices (ESP32) to the
+FastAPI backend:
+
+    ESP32 #1 ─┐
+    ESP32 #2 ─┼─ BLE links ─> this gateway ─> HTTP ─> FastAPI
+    ESP32 #N ─┘
+
+Self-paced model:
+    - The gateway follows ONE active quiz on the backend.
+    - QUIZ_INFO is broadcast to every connected device.
+    - Q1 is pushed to each device when the quiz starts.
+    - After a device's answer is accepted, the NEXT question
+      is pushed to THAT device only (each student advances
+      at their own pace under the same quiz clock).
+    - Quiz end (teacher or time limit) broadcasts QUIZ_END.
+
+Reliability:
+    - Devices are discovered by the PulseNet service UUID
+      (plus any addresses in PULSENET_DEVICE_ADDRESSES).
+    - Each device has its own connection task that reconnects
+      automatically after a BLE drop.
+    - On reconnect mid-quiz the gateway re-pushes the right
+      question for that device's student.
+    - The device stamps answers with a rising `sequence`
+      counter; the backend keeps the newest attempt and
+      ignores stale/duplicate deliveries.
+"""
+
 import asyncio
 import json
+import os
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-from bleak import BleakClient
+from bleak import BleakClient, BleakScanner
 
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
+# Comma-separated BLE addresses to always try in addition to
+# scanning (useful when a device does not advertise the
+# service UUID). Example:
+#
+#     PULSENET_DEVICE_ADDRESSES="54:43:B2:DC:B0:B2, ..."
+#
 DEVICE_ADDRESS = "54:43:B2:DC:B0:B2"
 
-FASTAPI_URL = "http://127.0.0.1:8000"
+FASTAPI_URL = os.environ.get("PULSENET_API_URL", "http://127.0.0.1:8000")
 
 # Whole-quiz countdown (seconds) used when the teacher has
 # not set a custom time limit on the dashboard.
@@ -24,22 +63,31 @@ QUIZ_DEFAULT_TIME_LIMIT_SEC = 300
 # How often the gateway re-reads quiz state from the backend.
 QUIZ_POLL_INTERVAL = 1.5
 
-# Headless mode: run without the interactive menu so the
-# gateway can be daemonized with nohup/systemd. Active
-# automatically when stdin is not a TTY (e.g. background
-# start via start_gateway.sh).
-INTERACTIVE = sys.stdin.isatty()
-
+SCAN_INTERVAL = 5.0
+SCAN_TIMEOUT = 3.0
+BLE_CONNECT_TIMEOUT = 8.0
+RECONNECT_DELAY = 3.0
 HEARTBEAT_INTERVAL = 2.0
 
-QUESTION_POLL_INTERVAL = 1.5
+# A single BLE write is capped by the negotiated ATT MTU.
+# QUESTION packets carrying long text are therefore split:
+# a QBEGIN control packet announces the total byte count,
+# then the raw JSON bytes follow in chunks. 180 bytes fits
+# every MTU the link negotiates in practice (>= 185), and
+# short packets still go out as ONE write (legacy behavior).
+BLE_CHUNK_SIZE = 180
+BLE_CHUNK_DELAY = 0.05  # let the ESP32 BLE queue drain
 
-RECONNECT_DELAY = 3.0
+INTERACTIVE = sys.stdin.isatty()
 
 
 # ============================================================
 # BLE UUID
 # ============================================================
+
+PULSENET_SERVICE_UUID = (
+    "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+)
 
 REGISTRATION_CHAR_UUID = (
     "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
@@ -59,22 +107,82 @@ ACK_CHAR_UUID = (
 
 
 # ============================================================
+# DEVICE LINK REGISTRY
+# ============================================================
+
+class DeviceLink:
+    """
+    One student device (by BLE address).
+
+    `task`      : the running connection session (None while
+                  disconnected / waiting to reconnect).
+    `connected` : BLE link up.
+    `student_id`: student registered from this device during
+                  the active quiz (None until REGISTER).
+    `last_pushed`: last question number pushed to this device
+                  (None = nothing pushed for this quiz yet).
+    """
+
+    def __init__(self, address):
+        self.address = address.upper()
+        self.task = None
+        self.client = None
+        self.connected = False
+        self.student_id = None
+        self.last_pushed = None
+
+    def status(self):
+        return {
+            "address": self.address,
+            "connected": self.connected,
+            "student_id": self.student_id,
+            "last_pushed_question": self.last_pushed,
+        }
+
+
+# address (upper) -> DeviceLink
+links: dict[str, DeviceLink] = {}
+
+# BlueZ (the Pi's BLE stack) rejects a discovery request while
+# another discovery/connect is starting up
+# ("org.bluez.Error.InProgress"). The supervisor's scan and
+# the per-device connects must therefore take turns starting;
+# an ESTABLISHED connection does not block the scanner.
+ble_lock = asyncio.Lock()
+
+
+def get_or_create_link(address):
+    address = str(address).strip().upper()
+    link = links.get(address)
+    if link is None:
+        link = DeviceLink(address)
+        links[address] = link
+    return link
+
+
+# Seed with the classic single device so the gateway keeps
+# working before the first scan completes.
+get_or_create_link(DEVICE_ADDRESS)
+
+for extra in os.environ.get(
+    "PULSENET_DEVICE_ADDRESSES", "",
+).split(","):
+    extra = extra.strip().upper()
+    if extra:
+        get_or_create_link(extra)
+
+
+def connected_links():
+    return [link for link in links.values() if link.connected]
+
+
+# ============================================================
 # ACTIVE QUIZ STATE
 # ============================================================
 
-# The gateway does NOT hard-code quiz_id anymore.
-#
-# Teacher Web starts a quiz:
-#
-#     POST /api/quizzes/{quiz_id}/start
-#
-# Then this gateway discovers the quiz whose status is "running".
-#
 ACTIVE_QUIZ_ID = None
 ACTIVE_SESSION_ID = None
 
-# Mirrored quiz attributes for QUIZ_INFO packets and the
-# quiz countdown.
 ACTIVE_QUIZ_TITLE = ""
 ACTIVE_QUIZ_STATUS = ""
 ACTIVE_QUIZ_TIME_LIMIT = 300
@@ -82,202 +190,77 @@ ACTIVE_QUIZ_EXPECTED = 0
 ACTIVE_QUIZ_PREFIX = ""
 ACTIVE_QUIZ_ID_LENGTH = 0
 
-# Last question number pushed to the device by the
-# auto-push loop (None = nothing pushed yet).
-LAST_PUSHED_QUESTION = None
+# (quiz_id, status, time_limit, total) of the last QUIZ_INFO
+# packet broadcast, so it is only resent when changed.
+QUIZ_SENT_INFO_KEY = None
 
-# When the current question was pushed, and whether we are
-# still waiting for an answer to it (informational only —
-# the quiz countdown is global, not per question).
-PUSHED_AT = 0.0
+# Quiz id for which QUIZ_END has already been broadcast.
+QUIZ_END_SENT_QUIZ = None
 
 # Question list cache per quiz (for self-paced advancing).
 QUIZ_QUESTIONS = []
 QUIZ_QUESTIONS_QUIZ_ID = None
 
-# (quiz_id, status, time_limit) of the last QUIZ_INFO packet
-# sent to the device, so we only resend when something
-# actually changed.
-QUIZ_SENT_INFO_KEY = None
-
-# Quiz id for which a QUIZ_END has already been sent.
-QUIZ_END_SENT_QUIZ = None
-
 
 # ============================================================
 # RUNTIME REGISTRATION DATA
-# ============================================================
-
+#
 # student_id -> {
 #     "device_mac": "...",
 #     "device_name": "...",
 #     "quiz_id": 1,
+#     "link": DeviceLink,
 # }
+# ============================================================
+
 registered_devices = {}
 
 
 # ============================================================
-# GLOBAL BLE CLIENT
+# HELPERS - HTTP JSON
 # ============================================================
 
-current_client = None
-
-
-# ============================================================
-# HELPER - NORMALIZE MAC
-# ============================================================
-
-def normalize_mac(device_mac):
-    """
-    Normalize BLE MAC address.
-
-    Example:
-
-        54:43:b2:dc:b0:b2
-
-    becomes:
-
-        54:43:B2:DC:B0:B2
-    """
-
-    return str(device_mac).strip().upper()
-
-
-# ============================================================
-# HELPER - HTTP JSON GET
-# ============================================================
-
-def http_get_json(url):
-    """
-    Perform HTTP GET and return:
-
-        (success, result)
-
-    result is parsed JSON when possible.
-    """
-
+def http_get_json(url, log=True):
+    """HTTP GET -> (success, parsed JSON or None)."""
     request = urllib.request.Request(
         url,
-        headers={
-            "Accept": "application/json",
-        },
+        headers={"Accept": "application/json"},
         method="GET",
     )
 
     try:
-        with urllib.request.urlopen(
-            request,
-            timeout=5,
-        ) as response:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            body = response.read().decode("utf-8")
 
-            body = response.read().decode(
-                "utf-8"
-            )
+            if log:
+                print(f"[HTTP GET] {url} -> {response.status}")
 
-            print(
-                f"[HTTP GET] {url}"
-            )
-
-            print(
-                f"[HTTP] {response.status}"
-            )
-
-            print(
-                f"[BODY] {body}"
-            )
-
-            if (
-                response.status < 200
-                or response.status >= 300
-            ):
+            if not (200 <= response.status < 300):
                 return False, None
 
             try:
                 return True, json.loads(body)
-
             except json.JSONDecodeError as e:
-
-                print(
-                    "[ERROR] Invalid JSON response."
-                )
-
-                print(
-                    f"Reason: {e}"
-                )
-
+                print(f"[ERROR] Invalid JSON response: {e}")
                 return False, None
 
     except urllib.error.HTTPError as e:
-
-        body = e.read().decode(
-            "utf-8",
-            errors="replace",
-        )
-
-        print(
-            f"[ERROR] HTTP GET failed: {e.code}"
-        )
-
-        print(
-            f"Response: {body}"
-        )
+        body = e.read().decode("utf-8", errors="replace")
+        print(f"[ERROR] HTTP GET failed: {e.code} {body}")
 
         try:
             return False, json.loads(body)
-
         except json.JSONDecodeError:
             return False, None
 
-    except urllib.error.URLError as e:
-
-        print(
-            "[ERROR] Cannot connect to FastAPI."
-        )
-
-        print(
-            f"Reason: {e.reason}"
-        )
-
-        return False, None
-
     except Exception as e:
-
-        print(
-            "[ERROR] HTTP GET failed."
-        )
-
-        print(
-            f"Type  : {type(e).__name__}"
-        )
-
-        print(
-            f"Reason: {e}"
-        )
-
+        print(f"[ERROR] HTTP GET failed: {type(e).__name__}: {e}")
         return False, None
 
 
-# ============================================================
-# HELPER - HTTP JSON POST
-# ============================================================
-
-def http_post_json(
-    url,
-    payload,
-):
-    """
-    Perform HTTP POST with JSON body.
-
-    Returns:
-
-        (success, result)
-    """
-
-    data = json.dumps(
-        payload
-    ).encode(
-        "utf-8"
-    )
+def http_post_json(url, payload, log=True):
+    """HTTP POST JSON -> (success, parsed JSON or None)."""
+    data = json.dumps(payload).encode("utf-8")
 
     request = urllib.request.Request(
         url,
@@ -289,139 +272,41 @@ def http_post_json(
         method="POST",
     )
 
-    print()
-    print("======================================")
-    print("[HTTP POST]")
-    print("======================================")
-
-    print(
-        f"URL     : {url}"
-    )
-
-    print(
-        f"Payload : {json.dumps(payload)}"
-    )
-
-    print("======================================")
+    if log:
+        print(f"[HTTP POST] {url} {json.dumps(payload)}")
 
     try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            body = response.read().decode("utf-8")
 
-        with urllib.request.urlopen(
-            request,
-            timeout=5,
-        ) as response:
+            if log:
+                print(f"[HTTP] {response.status} {body}")
 
-            response_body = (
-                response
-                .read()
-                .decode(
-                    "utf-8"
-                )
-            )
-
-            print(
-                f"HTTP    : {response.status}"
-            )
-
-            print(
-                f"Response: {response_body}"
-            )
-
-            if (
-                response.status < 200
-                or response.status >= 300
-            ):
+            if not (200 <= response.status < 300):
                 return False, None
 
             try:
-
-                result = json.loads(
-                    response_body
-                )
-
-            except json.JSONDecodeError as e:
-
-                print(
-                    "[ERROR] Invalid JSON response."
-                )
-
-                print(
-                    f"Reason: {e}"
-                )
-
+                return True, json.loads(body)
+            except json.JSONDecodeError:
                 return False, None
 
-            return True, result
-
     except urllib.error.HTTPError as e:
-
-        error_body = (
-            e.read()
-            .decode(
-                "utf-8",
-                errors="replace",
-            )
-        )
-
-        print(
-            f"[ERROR] HTTP error: {e.code}"
-        )
-
-        print(
-            f"Response: {error_body}"
-        )
+        body = e.read().decode("utf-8", errors="replace")
+        print(f"[ERROR] HTTP error: {e.code} {body}")
 
         try:
-
-            return False, json.loads(
-                error_body
-            )
-
+            return False, json.loads(body)
         except json.JSONDecodeError:
-
             return False, None
 
-    except urllib.error.URLError as e:
-
-        print(
-            "[ERROR] Cannot connect to FastAPI."
-        )
-
-        print(
-            f"Reason: {e.reason}"
-        )
-
-        return False, None
-
     except Exception as e:
-
-        print(
-            "[ERROR] HTTP POST failed."
-        )
-
-        print(
-            f"Type  : {type(e).__name__}"
-        )
-
-        print(
-            f"Reason: {e}"
-        )
-
+        print(f"[ERROR] HTTP POST failed: {type(e).__name__}: {e}")
         return False, None
 
-
-# ============================================================
-# QUIET HTTP HELPERS
-# For background loops (heartbeat, question poll):
-# no logging — they run every 1.5-2 seconds.
-# ============================================================
 
 def http_get_json_quiet(url):
     try:
-        with urllib.request.urlopen(
-            url,
-            timeout=5,
-        ) as response:
+        with urllib.request.urlopen(url, timeout=5) as response:
             body = response.read().decode("utf-8")
             if not (200 <= response.status < 300):
                 return False, None
@@ -439,10 +324,7 @@ def http_post_json_quiet(url, payload):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(
-            request,
-            timeout=5,
-        ) as response:
+        with urllib.request.urlopen(request, timeout=5) as response:
             body = response.read().decode("utf-8")
             if not (200 <= response.status < 300):
                 return False, None
@@ -451,400 +333,191 @@ def http_post_json_quiet(url, payload):
         return False, None
 
 
+def normalize_mac(device_mac):
+    return str(device_mac).strip().upper()
+
+
+def to_device_ascii(text):
+    """
+    Transliterate text for the device's classic 5x7 ASCII
+    font: Vietnamese diacritics become their base letters
+    ("học" -> "hoc"), đ/Đ become d/D, and any other non-ASCII
+    character is dropped. Newlines are preserved (the firmware
+    renders them as hard line breaks); other control
+    characters become spaces.
+
+    This is transliteration, NOT full Vietnamese glyph
+    support — the display font has no Vietnamese characters.
+    """
+    text = str(text).replace("đ", "d").replace("Đ", "D")
+
+    text = (
+        unicodedata.normalize("NFD", text)
+        .encode("ascii", "ignore")
+        .decode("ascii")
+    )
+
+    return "".join(
+        ch if (ch == "\n" or ch >= " ") else " "
+        for ch in text
+    )
+
+
+def device_code_from_mac(device_mac):
+    """
+    Display code derived from the BLE address, e.g.
+    "1C:69:20:96:84:2A" -> "PULSENET-842A".
+
+    Every board flashed with identical firmware reports the
+    SAME device_name in its REGISTER packet, but the backend
+    requires device_code to be UNIQUE per device — the MAC
+    suffix is the stable unique part, so it becomes the code.
+    """
+    suffix = (
+        normalize_mac(device_mac).replace(":", "")[-4:]
+    )
+    return f"PULSENET-{suffix}"
+
+
 # ============================================================
-# GET RUNNING QUIZ
+# QUIZ DISCOVERY
 # Teacher Web -> FastAPI -> Gateway
 # ============================================================
 
 def get_running_quiz():
     """
-    Discover the quiz currently running in FastAPI.
+    Pick the quiz this gateway should follow.
 
-    Teacher Web starts a quiz through:
-
-        POST /api/quizzes/{quiz_id}/start
-
-    Then:
-
-        GET /api/quizzes
-
-    returns all quizzes.
-
-    We select the quiz with:
-
-        status == "running"
-
-    Returns:
-
-        {
-            "id": ...,
-            "title": ...,
-            "status": "running",
-            ...
-        }
-
-    or None.
+    Priority: the followed quiz while it is still
+    lobby/running, then the single running quiz, then the
+    newest lobby, then the newest draft.
     """
 
-    url = (
-        f"{FASTAPI_URL}"
-        "/api/quizzes"
-    )
+    success, result = http_get_json(f"{FASTAPI_URL}/api/quizzes")
 
-    success, result = (
-        http_get_json(url)
-    )
-
-    if not success:
-        print(
-            "[ERROR] Cannot get quizzes "
-            "from FastAPI."
-        )
-
+    if not success or not isinstance(result, list):
+        print("[ERROR] Cannot get quizzes from FastAPI.")
         return None
 
-    if not isinstance(
-        result,
-        list,
-    ):
-
-        print(
-            "[ERROR] /api/quizzes "
-            "did not return a list."
-        )
-
-        return None
-
-    # ------------------------------------------------
-    # 1. The quiz this gateway last announced via
-    #    QUIZ_INFO (lobby or running) wins — the
-    #    device on screen is answering to THAT quiz.
-    # ------------------------------------------------
+    # 1. Keep following the quiz we last announced.
 
     if ACTIVE_QUIZ_ID is not None:
-
         for quiz in result:
-
             if (
                 quiz.get("id") == ACTIVE_QUIZ_ID
-                and quiz.get("status")
-                in ("lobby", "running")
+                and quiz.get("status") in ("lobby", "running")
             ):
                 return quiz
 
-    running_quizzes = [
-        quiz
-        for quiz in result
+    running = [
+        quiz for quiz in result
         if quiz.get("status") == "running"
     ]
 
-    if not running_quizzes:
-
-        # ------------------------------------------------
-        # No running quiz.
-        #
-        # Fall back to the NEWEST LOBBY quiz (Kahoot
-        # flow: students register while the teacher
-        # waits in the lobby), then to the newest
-        # draft quiz.
-        # ------------------------------------------------
-
-        lobby_quizzes = [
-            quiz
-            for quiz in result
+    if not running:
+        lobbies = [
+            quiz for quiz in result
             if quiz.get("status") == "lobby"
         ]
 
-        if lobby_quizzes:
-
-            lobby_quizzes.sort(
-                key=lambda quiz: quiz.get("id") or 0,
-                reverse=True,
-            )
-
+        if lobbies:
+            lobbies.sort(key=lambda q: q.get("id") or 0, reverse=True)
             print(
-                "[INFO] No running quiz. "
-                "Using newest lobby quiz "
-                f"{lobby_quizzes[0].get('id')} "
-                "for registration."
+                f"[INFO] No running quiz. "
+                f"Using newest lobby quiz {lobbies[0].get('id')}."
             )
+            return lobbies[0]
 
-            return lobby_quizzes[0]
-
-        draft_quizzes = [
-            quiz
-            for quiz in result
+        drafts = [
+            quiz for quiz in result
             if quiz.get("status") == "draft"
         ]
 
-        if draft_quizzes:
-
-            draft_quizzes.sort(
-                key=lambda quiz: quiz.get("id") or 0,
-                reverse=True,
-            )
-
-            if len(draft_quizzes) > 1:
-
-                print(
-                    "[WARN] Multiple draft quizzes. "
-                    "Using the newest one."
-                )
-
+        if drafts:
+            drafts.sort(key=lambda q: q.get("id") or 0, reverse=True)
             print(
-                "[INFO] No running quiz. "
-                "Using newest draft quiz "
-                f"{draft_quizzes[0].get('id')} "
-                "for registration."
+                f"[INFO] No running quiz. "
+                f"Using newest draft quiz {drafts[0].get('id')}."
             )
-
-            return draft_quizzes[0]
-
-        print(
-            "[INFO] No running, lobby or draft quiz."
-        )
+            return drafts[0]
 
         return None
 
-    if len(running_quizzes) > 1:
+    if len(running) > 1:
+        print("[ERROR] Multiple running quizzes — following the newest.")
+        running.sort(key=lambda q: q.get("id") or 0, reverse=True)
 
-        print()
-        print("======================================")
-        print("[ERROR] MULTIPLE RUNNING QUIZZES")
-        print("======================================")
+    return running[0]
 
-        for quiz in running_quizzes:
-
-            print(
-                f"Quiz ID : {quiz.get('id')}"
-            )
-
-            print(
-                f"Title   : {quiz.get('title')}"
-            )
-
-            print(
-                "--------------------------------------"
-            )
-
-        print(
-            "[ERROR] Gateway cannot determine "
-            "which quiz should receive registration."
-        )
-
-        print("======================================")
-
-        return None
-
-    quiz = running_quizzes[0]
-
-    return quiz
-
-
-# ============================================================
-# REFRESH ACTIVE QUIZ
-# ============================================================
 
 def refresh_active_quiz():
-    """
-    Discover and store the currently running quiz.
-    """
-
+    """Discover and store the currently followed quiz."""
     global ACTIVE_QUIZ_ID
     global ACTIVE_SESSION_ID
 
     quiz = get_running_quiz()
 
     if quiz is None:
-
         ACTIVE_QUIZ_ID = None
         ACTIVE_SESSION_ID = None
-
         return False
 
-    ACTIVE_QUIZ_ID = quiz.get(
-        "id"
-    )
-
-    # The current backend does not have a
-    # dedicated session_id field.
-    #
-    # Therefore we use a deterministic runtime
-    # session identifier based on quiz_id.
-    ACTIVE_SESSION_ID = (
-        f"QUIZ-{ACTIVE_QUIZ_ID}"
-    )
-
-    print()
-    print("======================================")
-    print("[ACTIVE QUIZ]")
-    print("======================================")
+    ACTIVE_QUIZ_ID = quiz.get("id")
+    ACTIVE_SESSION_ID = f"QUIZ-{ACTIVE_QUIZ_ID}"
 
     print(
-        f"Quiz ID : {ACTIVE_QUIZ_ID}"
+        f"[ACTIVE QUIZ] {ACTIVE_QUIZ_ID} "
+        f"'{quiz.get('title')}' ({quiz.get('status')})"
     )
-
-    print(
-        f"Title   : {quiz.get('title')}"
-    )
-
-    print(
-        f"Status  : {quiz.get('status')}"
-    )
-
-    print(
-        f"Session : {ACTIVE_SESSION_ID}"
-    )
-
-    print("======================================")
 
     return True
 
 
 # ============================================================
-# GET CURRENT QUESTION FROM FASTAPI
+# BLE CHARACTERISTIC
 # ============================================================
 
-def get_current_question():
-    """
-    Get the current question selected by Teacher Web.
-
-    Endpoint:
-
-        GET /api/quizzes/{quiz_id}/current
-    """
-
-    if ACTIVE_QUIZ_ID is None:
-
-        print(
-            "[ERROR] No active quiz."
-        )
-
-        return None
-
-    url = (
-        f"{FASTAPI_URL}"
-        f"/api/quizzes/"
-        f"{ACTIVE_QUIZ_ID}"
-        "/current"
-    )
-
-    success, result = (
-        http_get_json(url)
-    )
-
-    if not success:
-        print(
-            "[ERROR] Failed to get current "
-            "question."
-        )
-
-        return None
-
-    return result
-
-
-# ============================================================
-# GET BLE CHARACTERISTIC
-# ============================================================
-
-def get_characteristic(
-    client,
-    uuid,
-):
-    """
-    Get GATT characteristic.
-
-    Bleak performs service discovery after connection.
-    """
-
+def get_characteristic(client, uuid):
     if not client.is_connected:
-
-        raise RuntimeError(
-            "BLE client is not connected."
-        )
+        raise RuntimeError("BLE client is not connected.")
 
     services = client.services
 
     if services is None:
+        raise RuntimeError("BLE services are not available.")
 
-        raise RuntimeError(
-            "BLE services are not available."
-        )
-
-    characteristic = (
-        services.get_characteristic(
-            uuid
-        )
-    )
+    characteristic = services.get_characteristic(uuid)
 
     if characteristic is None:
-
-        raise RuntimeError(
-            f"Characteristic not found: {uuid}"
-        )
+        raise RuntimeError(f"Characteristic not found: {uuid}")
 
     return characteristic
 
 
-# ============================================================
-# SEND ACK
-# Raspberry Pi -> ESP32
-# ============================================================
+async def write_json(client, uuid, packet):
+    # ensure_ascii=False keeps text readable if any non-ASCII
+    # sneaks in (the device renders raw bytes); question text
+    # is transliterated to ASCII before it ever gets here.
+    data = json.dumps(
+        packet, separators=(",", ":"), ensure_ascii=False,
+    ).encode("utf-8")
 
-async def send_ack(
-    client,
-    message,
-):
-    data = message.encode(
-        "utf-8"
-    )
+    char = get_characteristic(client, uuid)
 
-    print()
-    print("======================================")
-    print("[ACK TX]")
-    print("======================================")
+    await client.write_gatt_char(char, data, response=True)
 
-    print(message)
 
-    print("======================================")
+async def write_bytes(client, uuid, data):
+    char = get_characteristic(client, uuid)
 
-    ack_char = get_characteristic(
-        client,
-        ACK_CHAR_UUID,
-    )
-
-    print(
-        f"[INFO] ACK characteristic: "
-        f"{ack_char.uuid}"
-    )
-
-    print(
-        f"[INFO] Properties: "
-        f"{ack_char.properties}"
-    )
-
-    await client.write_gatt_char(
-        ack_char,
-        data,
-        response=True,
-    )
-
-    print(
-        "[OK] ACK sent."
-    )
+    await client.write_gatt_char(char, data, response=True)
 
 
 # ============================================================
-# SEND REGISTER ACK
+# SEND ACK PACKETS (Pi -> ESP32)
 # ============================================================
 
-async def send_register_ack(
-    client,
-    student_id,
-    status,
-    reason=None,
-):
+async def send_register_ack(link, student_id, status, reason=None):
     packet = {
         "type": "REGISTER_ACK",
         "session_id": ACTIVE_SESSION_ID,
@@ -854,26 +527,15 @@ async def send_register_ack(
     }
 
     if reason:
-        packet["reason"] = reason
+        # Backend detail strings may carry Vietnamese — the
+        # device font only has ASCII glyphs.
+        packet["reason"] = to_device_ascii(reason)
 
-    await send_ack(
-        client,
-        json.dumps(
-            packet,
-            separators=(
-                ",",
-                ":",
-            ),
-        ),
-    )
+    await write_json(link.client, ACK_CHAR_UUID, packet)
 
-
-# ============================================================
-# SEND ANSWER ACK
-# ============================================================
 
 async def send_answer_ack(
-    client,
+    link,
     question_id,
     status,
     reason=None,
@@ -891,23 +553,13 @@ async def send_answer_ack(
         packet["correct"] = correct
 
     if reason:
-        packet["reason"] = reason
+        packet["reason"] = to_device_ascii(reason)
 
-    await send_ack(
-        client,
-        json.dumps(
-            packet,
-            separators=(
-                ",",
-                ":",
-            ),
-        ),
-    )
+    await write_json(link.client, ACK_CHAR_UUID, packet)
 
 
 # ============================================================
 # REGISTER DEVICE WITH FASTAPI
-# Raspberry Pi -> FastAPI
 # ============================================================
 
 def register_device_with_fastapi(
@@ -916,93 +568,40 @@ def register_device_with_fastapi(
     device_name,
     quiz_id,
 ):
-    """
-    Register a physical device to a student
-    for ONE SPECIFIC QUIZ.
-
-    Backend endpoint:
-
-        POST /api/devices/register
-
-    Required payload:
-
-        {
-            "student_id": "...",
-            "device_mac": "...",
-            "device_code": "...",
-            "quiz_id": 2
-        }
-    """
-
-    device_mac = normalize_mac(
-        device_mac
-    )
-
     payload = {
         "student_id": student_id,
-        "device_mac": device_mac,
-        "device_code": device_name,
+        "device_mac": normalize_mac(device_mac),
+
+        # Not the firmware's device_name: all boards flashed
+        # with the same code report an identical name, and the
+        # backend needs this unique per device.
+        "device_code": device_code_from_mac(device_mac),
+
         "quiz_id": quiz_id,
     }
 
-    url = (
-        f"{FASTAPI_URL}"
-        "/api/devices/register"
+    success, result = http_post_json(
+        f"{FASTAPI_URL}/api/devices/register",
+        payload,
     )
 
-    success, result = (
-        http_post_json(
-            url,
-            payload,
-        )
-    )
-
-    if not success:
-
-        print(
-            "[ERROR] FastAPI registration failed."
-        )
-
+    if not success or not isinstance(result, dict):
         return False, result
 
-    if not isinstance(
-        result,
-        dict,
-    ):
-
+    if result.get("success") is not True:
         print(
-            "[ERROR] Invalid FastAPI response."
+            "[ERROR] FastAPI rejected device registration: "
+            f"{result.get('message', result.get('detail', 'unknown'))}"
         )
-
-        return False, None
-
-    if result.get(
-        "success"
-    ) is not True:
-
-        print(
-            "[ERROR] FastAPI rejected "
-            "device registration."
-        )
-
-        print(
-            f"Reason: "
-            f"{result.get('message', 'Unknown error')}"
-        )
-
         return False, result
 
-    print(
-        "[OK] Device registered "
-        "with FastAPI."
-    )
+    print(f"[OK] {student_id} registered on {device_mac} (quiz {quiz_id}).")
 
     return True, result
 
 
 # ============================================================
 # SUBMIT ANSWER TO FASTAPI
-# Raspberry Pi -> FastAPI
 # ============================================================
 
 def submit_answer_to_fastapi(
@@ -1013,74 +612,30 @@ def submit_answer_to_fastapi(
     quiz_id,
     sequence=None,
 ):
-    """
-    Submit answer using the active quiz.
-
-    Endpoint:
-
-        POST /api/responses/answer
-    """
-
-    device_mac = normalize_mac(
-        device_mac
-    )
-
     payload = {
         "student_id": student_id,
-        "device_mac": device_mac,
+        "device_mac": normalize_mac(device_mac),
         "quiz_id": quiz_id,
         "question_id": question_id,
         "answer": answer,
     }
 
     if sequence is not None:
-
         payload["sequence"] = sequence
 
-    url = (
-        f"{FASTAPI_URL}"
-        "/api/responses/answer"
+    success, result = http_post_json(
+        f"{FASTAPI_URL}/api/responses/answer",
+        payload,
     )
 
-    success, result = (
-        http_post_json(
-            url,
-            payload,
-        )
-    )
-
-    if not success:
-
-        print(
-            "[ERROR] FastAPI rejected answer."
-        )
-
+    if not success or not isinstance(result, dict):
         return False, result
 
-    if not isinstance(
-        result,
-        dict,
-    ):
-
-        return False, None
-
-    if result.get(
-        "success"
-    ) is not True:
-
-        print(
-            "[ERROR] FastAPI did not "
-            "accept the answer."
-        )
-
+    if result.get("success") is not True:
         return False, result
 
     print(
-        "[OK] Answer accepted by FastAPI."
-    )
-
-    print(
-        f"[RESULT] "
+        f"[OK] Answer accepted ({result.get('status')}): "
         f"{'CORRECT' if result.get('correct') else 'WRONG'}"
     )
 
@@ -1088,923 +643,67 @@ def submit_answer_to_fastapi(
 
 
 # ============================================================
-# REGISTRATION PROCESS
-# ESP32 -> Raspberry Pi -> FastAPI
+# RELOAD REGISTRATIONS FROM BACKEND
+#
+# registered_devices is in-memory and lost on gateway
+# restart; the DATABASE is the source of truth.
 # ============================================================
 
-async def process_registration(
-    client,
-    message,
-):
-    global current_student_id
-    global current_device_mac
-    global current_device_name
-
-    print()
-    print("======================================")
-    print("[REGISTRATION RECEIVED]")
-    print("======================================")
-
-    print(message)
-
-    print("======================================")
-
-    # --------------------------------------------------------
-    # REFRESH ACTIVE QUIZ
-    # --------------------------------------------------------
-
-    if not refresh_active_quiz():
-
-        await send_register_ack(
-            client,
-            "",
-            "REJECTED",
-            "NO_ACTIVE_QUIZ",
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # PARSE JSON
-    # --------------------------------------------------------
-
-    try:
-
-        packet = json.loads(
-            message
-        )
-
-    except json.JSONDecodeError as e:
-
-        print(
-            f"[ERROR] Invalid JSON: {e}"
-        )
-
-        await send_register_ack(
-            client,
-            "",
-            "REJECTED",
-            "INVALID_JSON",
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # CHECK TYPE
-    # --------------------------------------------------------
-
-    if packet.get(
-        "type"
-    ) != "REGISTER":
-
-        print(
-            "[ERROR] Invalid registration type."
-        )
-
-        await send_register_ack(
-            client,
-            packet.get(
-                "student_id",
-                "",
-            ),
-            "REJECTED",
-            "INVALID_TYPE",
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # EXTRACT DATA
-    # --------------------------------------------------------
-
-    student_id = str(
-        packet.get(
-            "student_id",
-            "",
-        )
-    ).strip()
-
-    device_mac = normalize_mac(
-        packet.get(
-            "device_mac",
-            "",
-        )
+def reload_registered_devices_from_backend(quiz_id):
+    success, result = http_get_json(
+        f"{FASTAPI_URL}/api/quizzes/{quiz_id}/students",
+        log=False,
     )
 
-    device_name = str(
-        packet.get(
-            "device_name",
-            "",
-        )
-    ).strip()
-
-    print(
-        f"Student ID : {student_id}"
-    )
-
-    print(
-        f"Device MAC : {device_mac}"
-    )
-
-    print(
-        f"Device Name: {device_name}"
-    )
-
-    print(
-        f"Quiz ID    : {ACTIVE_QUIZ_ID}"
-    )
-
-    # --------------------------------------------------------
-    # VALIDATE STUDENT ID
-    # --------------------------------------------------------
-
-    if not student_id:
-
-        print(
-            "[ERROR] Student ID is empty."
-        )
-
-        await send_register_ack(
-            client,
-            "",
-            "REJECTED",
-            "EMPTY_STUDENT_ID",
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # VALIDATE MAC
-    # --------------------------------------------------------
-
-    if not device_mac:
-
-        print(
-            "[ERROR] Device MAC is empty."
-        )
-
-        await send_register_ack(
-            client,
-            student_id,
-            "REJECTED",
-            "EMPTY_DEVICE_MAC",
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # REGISTER WITH FASTAPI
-    # --------------------------------------------------------
-
-    success, result = (
-        register_device_with_fastapi(
-            student_id=student_id,
-            device_mac=device_mac,
-            device_name=device_name,
-            quiz_id=ACTIVE_QUIZ_ID,
-        )
-    )
-
-    # --------------------------------------------------------
-    # FASTAPI REJECTED
-    # --------------------------------------------------------
-
-    if not success:
-
-        print(
-            "[ERROR] FastAPI rejected "
-            "device registration."
-        )
-
-        reason = (
-            "SERVER_REGISTRATION_FAILED"
-        )
-
-        if result is not None:
-
-            detail = result.get(
-                "detail"
-            )
-
-            message_from_server = (
-                result.get(
-                    "message"
-                )
-            )
-
-            if detail:
-
-                if isinstance(
-                    detail,
-                    str,
-                ):
-                    reason = detail
-
-                else:
-                    reason = str(
-                        detail
-                    )
-
-            elif message_from_server:
-
-                reason = str(
-                    message_from_server
-                )
-
-        await send_register_ack(
-            client,
-            student_id,
-            "REJECTED",
-            reason,
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # STORE RUNTIME MAPPING
-    # --------------------------------------------------------
-
-    registered_devices[
-        student_id
-    ] = {
-        "device_mac": device_mac,
-        "device_name": device_name,
-        "quiz_id": ACTIVE_QUIZ_ID,
-    }
-
-    current_student_id = student_id
-    current_device_mac = device_mac
-    current_device_name = device_name
-
-    # --------------------------------------------------------
-    # PRINT REGISTRATION
-    # --------------------------------------------------------
-
-    print()
-    print("======================================")
-    print("[OK] REGISTRATION ACCEPTED")
-    print("======================================")
-
-    print(
-        f"Quiz ID    : {ACTIVE_QUIZ_ID}"
-    )
-
-    print(
-        f"Student ID : {student_id}"
-    )
-
-    print(
-        f"Device MAC : {device_mac}"
-    )
-
-    print(
-        f"Device Name: {device_name}"
-    )
-
-    print("======================================")
-
-    # --------------------------------------------------------
-    # SEND ACCEPTED ACK
-    # --------------------------------------------------------
-
-    await send_register_ack(
-        client,
-        student_id,
-        "ACCEPTED",
-    )
-
-
-# ============================================================
-# REGISTRATION CALLBACK
-# ESP32 -> Raspberry Pi
-# ============================================================
-
-def registration_callback(
-    characteristic,
-    data,
-):
-    message = data.decode(
-        "utf-8",
-        errors="replace",
-    )
-
-    client = current_client
-
-    if client is None:
-
-        print(
-            "[ERROR] No active BLE client."
-        )
-
-        return
-
-    asyncio.create_task(
-        process_registration(
-            client,
-            message,
-        )
-    )
-
-
-# ============================================================
-# ANSWER PROCESS
-# ESP32 -> Raspberry Pi -> FastAPI
-# ============================================================
-
-async def process_answer(
-    client,
-    message,
-):
-    print()
-    print("======================================")
-    print("[ANSWER RECEIVED]")
-    print("======================================")
-
-    print(message)
-
-    print("======================================")
-
-    # --------------------------------------------------------
-    # PARSE JSON
-    # --------------------------------------------------------
-
-    try:
-
-        packet = json.loads(
-            message
-        )
-
-    except json.JSONDecodeError as e:
-
-        print(
-            f"[ERROR] Invalid JSON: {e}"
-        )
-
-        await send_answer_ack(
-            client,
-            "",
-            "REJECTED",
-            "INVALID_JSON",
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # CHECK TYPE
-    # --------------------------------------------------------
-
-    if packet.get(
-        "type"
-    ) != "ANSWER":
-
-        print(
-            "[ERROR] Invalid answer type."
-        )
-
-        await send_answer_ack(
-            client,
-            packet.get(
-                "question_id",
-                "",
-            ),
-            "REJECTED",
-            "INVALID_TYPE",
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # GET ACTIVE QUIZ
-    # --------------------------------------------------------
-
-    if ACTIVE_QUIZ_ID is None:
-
-        refresh_active_quiz()
-
-    if ACTIVE_QUIZ_ID is None:
-
-        print(
-            "[ERROR] No active quiz."
-        )
-
-        await send_answer_ack(
-            client,
-            packet.get(
-                "question_id",
-                "",
-            ),
-            "REJECTED",
-            "NO_ACTIVE_QUIZ",
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # EXTRACT DATA
-    # --------------------------------------------------------
-
-    student_id = str(
-        packet.get(
-            "student_id",
-            "",
-        )
-    ).strip()
-
-    question_id = str(
-        packet.get(
-            "question_id",
-            "",
-        )
-    ).strip().upper()
-
-    answer = str(
-        packet.get(
-            "answer",
-            "",
-        )
-    ).strip().upper()
-
-    # --------------------------------------------------------
-    # VALIDATE
-    # --------------------------------------------------------
-
-    if not student_id:
-
-        await send_answer_ack(
-            client,
-            question_id,
-            "REJECTED",
-            "EMPTY_STUDENT_ID",
-        )
-
-        return
-
-    if not question_id:
-
-        await send_answer_ack(
-            client,
-            question_id,
-            "REJECTED",
-            "EMPTY_QUESTION_ID",
-        )
-
-        return
-
-    if answer not in (
-        "A",
-        "B",
-        "C",
-        "D",
-    ):
-
-        await send_answer_ack(
-            client,
-            question_id,
-            "REJECTED",
-            "INVALID_ANSWER",
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # CHECK REGISTRATION
-    # --------------------------------------------------------
-
-    if student_id not in registered_devices:
-
-        print(
-            "[ERROR] Student is not registered."
-        )
-
-        await send_answer_ack(
-            client,
-            question_id,
-            "REJECTED",
-            "STUDENT_NOT_REGISTERED",
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # GET REGISTERED DEVICE
-    # --------------------------------------------------------
-
-    device_info = (
-        registered_devices[
-            student_id
-        ]
-    )
-
-    device_mac = normalize_mac(
-        device_info[
-            "device_mac"
-        ]
-    )
-
-    registered_quiz_id = (
-        device_info.get(
-            "quiz_id"
-        )
-    )
-
-    # --------------------------------------------------------
-    # MAKE SURE DEVICE BELONGS TO
-    # CURRENT QUIZ
-    # --------------------------------------------------------
-
-    if (
-        registered_quiz_id
-        != ACTIVE_QUIZ_ID
-    ):
-
-        print(
-            "[ERROR] Student registration "
-            "belongs to another quiz."
-        )
-
-        await send_answer_ack(
-            client,
-            question_id,
-            "REJECTED",
-            "QUIZ_REGISTRATION_MISMATCH",
-        )
-
-        return
-
-    print(
-        f"Student ID : {student_id}"
-    )
-
-    print(
-        f"Device MAC : {device_mac}"
-    )
-
-    print(
-        f"Quiz ID    : {ACTIVE_QUIZ_ID}"
-    )
-
-    print(
-        f"Question   : {question_id}"
-    )
-
-    print(
-        f"Answer     : {answer}"
-    )
-
-    # --------------------------------------------------------
-    # SEQUENCE
-    # --------------------------------------------------------
-
-    sequence = packet.get(
-        "sequence"
-    )
-
-    if sequence is None:
-
-        try:
-
-            sequence = int(
-                question_id
-                .replace(
-                    "Q",
-                    "",
-                )
-            )
-
-        except ValueError:
-
-            sequence = None
-
-    # --------------------------------------------------------
-    # SUBMIT ANSWER
-    # --------------------------------------------------------
-
-    success, result = (
-        submit_answer_to_fastapi(
-            student_id=student_id,
-            device_mac=device_mac,
-            question_id=question_id,
-            answer=answer,
-            quiz_id=ACTIVE_QUIZ_ID,
-            sequence=sequence,
-        )
-    )
-
-    # --------------------------------------------------------
-    # FASTAPI REJECTED
-    # --------------------------------------------------------
-
-    if not success:
-
-        print(
-            "[ERROR] Answer rejected by FastAPI."
-        )
-
-        reason = (
-            "SERVER_ANSWER_FAILED"
-        )
-
-        if result is not None:
-
-            detail = result.get(
-                "detail"
-            )
-
-            if detail:
-
-                if isinstance(
-                    detail,
-                    str,
-                ):
-                    reason = detail
-
-                else:
-                    reason = str(
-                        detail
-                    )
-
-            elif result.get(
-                "status"
-            ):
-
-                reason = str(
-                    result.get(
-                        "status"
-                    )
-                )
-
-        await send_answer_ack(
-            client,
-            question_id,
-            "REJECTED",
-            reason,
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # GET RESULT
-    # --------------------------------------------------------
-
-    is_correct = bool(
-        result.get(
-            "correct",
-            False,
-        )
-    )
-
-    status = result.get(
-        "status",
-        "ACCEPTED",
-    )
-
-    print()
-    print("======================================")
-    print("[ANSWER RESULT]")
-    print("======================================")
-
-    print(
-        f"Quiz   : {ACTIVE_QUIZ_ID}"
-    )
-
-    print(
-        f"Student: {student_id}"
-    )
-
-    print(
-        f"Question: {question_id}"
-    )
-
-    print(
-        f"Answer : {answer}"
-    )
-
-    print(
-        f"Status : {status}"
-    )
-
-    print(
-        f"Result : "
-        f"{'CORRECT' if is_correct else 'WRONG'}"
-    )
-
-    print("======================================")
-
-    # --------------------------------------------------------
-    # SEND ACK
-    # --------------------------------------------------------
-
-    await send_answer_ack(
-        client,
-        question_id,
-        "ACCEPTED",
-        correct=is_correct,
-    )
-
-    # ------------------------------------------------
-    # SELF-PACED ADVANCE: push the next question right
-    # after the answer is accepted.
-    # ------------------------------------------------
-
-    try:
-        answered_number = int(
-            str(question_id).replace("Q", "")
-        )
-    except ValueError:
-        answered_number = LAST_PUSHED_QUESTION or 0
-
-    await push_next_question(
-        client,
-        answered_number,
-    )
-
-
-# ============================================================
-# ANSWER CALLBACK
-# ESP32 -> Raspberry Pi
-# ============================================================
-
-def answer_callback(
-    characteristic,
-    data,
-):
-    message = data.decode(
-        "utf-8",
-        errors="replace",
-    )
-
-    client = current_client
-
-    if client is None:
-
-        print(
-            "[ERROR] No active BLE client."
-        )
-
-        return
-
-    asyncio.create_task(
-        process_answer(
-            client,
-            message,
-        )
-    )
-
-
-# ============================================================
-# SEND CURRENT QUESTION
-# Raspberry Pi -> ESP32
-# ============================================================
-
-async def send_current_question(
-    client,
-):
-    """
-    Get the question currently selected by Teacher Web
-    and send it to ESP32.
-
-    Teacher Web controls:
-
-        POST /api/quizzes/{quiz_id}/start
-        POST /api/quizzes/{quiz_id}/next
-
-    Gateway reads:
-
-        GET /api/quizzes/{quiz_id}/current
-    """
-
-    if ACTIVE_QUIZ_ID is None:
-
-        if not refresh_active_quiz():
-
-            print(
-                "[ERROR] No active quiz."
-            )
-
-            return False
-
-    question = (
-        get_current_question()
-    )
-
-    if question is None:
-
-        print(
-            "[ERROR] No current question."
-        )
-
+    if not success or not isinstance(result, dict):
         return False
 
-    question_id = (
-        f"Q{int(question['question_number']):02d}"
-    )
+    students = result.get("students")
 
-    packet = {
-        "type": "QUESTION",
-        "session_id": ACTIVE_SESSION_ID,
-        "quiz_id": ACTIVE_QUIZ_ID,
-        "question_id": question_id,
-        "question": question[
-            "question_text"
-        ],
-        "A": question[
-            "option_a"
-        ],
-        "B": question[
-            "option_b"
-        ],
-        "C": question[
-            "option_c"
-        ],
-        "D": question[
-            "option_d"
-        ],
-    }
-
-    message = json.dumps(
-        packet,
-        separators=(
-            ",",
-            ":",
-        ),
-    )
-
-    data = message.encode(
-        "utf-8"
-    )
-
-    print()
-    print("======================================")
-    print("[QUESTION TX]")
-    print("======================================")
-
-    print(
-        f"Quiz ID  : {ACTIVE_QUIZ_ID}"
-    )
-
-    print(
-        f"Question : {question_id}"
-    )
-
-    print(
-        message
-    )
-
-    print("======================================")
-
-    try:
-
-        question_char = (
-            get_characteristic(
-                client,
-                QUESTION_CHAR_UUID,
-            )
-        )
-
-        await client.write_gatt_char(
-            question_char,
-            data,
-            response=True,
-        )
-
-        print(
-            "[OK] Current question "
-            "sent successfully."
-        )
-
-        return True
-
-    except Exception as e:
-
-        print(
-            "[ERROR] Failed to send question."
-        )
-
-        print(
-            f"Type  : {type(e).__name__}"
-        )
-
-        print(
-            f"Reason: {e}"
-        )
-
+    if not isinstance(students, list):
         return False
+
+    restored = 0
+
+    for student in students:
+        student_id = str(student.get("student_id", "") or "").strip()
+        device_mac = normalize_mac(student.get("device_mac", "") or "")
+
+        if not student_id:
+            continue
+
+        registered_devices[student_id] = {
+            "device_mac": device_mac,
+            "device_name": str(student.get("device_code", "") or ""),
+            "quiz_id": quiz_id,
+            "link": links.get(device_mac),
+        }
+
+        link = links.get(device_mac)
+
+        if link is not None:
+            link.student_id = student_id
+
+        restored += 1
+
+    if restored:
+        print(
+            f"[REG] Restored {restored} registration(s) "
+            f"for quiz {quiz_id} from backend."
+        )
+
+    return restored > 0
 
 
 # ============================================================
-# SELF-PACED QUESTION ADVANCE
-# After a student answers (or the time runs out), the
-# gateway pushes the next question to the device without
-# waiting for the teacher.
+# QUESTION CACHE + PUSH (self-paced)
 # ============================================================
 
 async def ensure_questions_cache():
     """
-    Load the quiz's question list once per quiz.
-
-    An EMPTY cache is re-fetched on every call: questions
-    may have been imported after the first load (e.g. the
-    gateway connected before the teacher finished importing).
+    Load the quiz's question list once per quiz. An EMPTY
+    cache is re-fetched every call (questions may have been
+    imported after the first load).
     """
     global QUIZ_QUESTIONS
     global QUIZ_QUESTIONS_QUIZ_ID
@@ -2018,14 +717,9 @@ async def ensure_questions_cache():
     ):
         return True
 
-    url = (
-        f"{FASTAPI_URL}/api/quizzes/"
-        f"{ACTIVE_QUIZ_ID}/questions"
-    )
-
     success, questions = await asyncio.to_thread(
         http_get_json_quiet,
-        url,
+        f"{FASTAPI_URL}/api/quizzes/{ACTIVE_QUIZ_ID}/questions",
     )
 
     if not success or not isinstance(questions, list):
@@ -2049,21 +743,23 @@ async def ensure_questions_cache():
     return bool(QUIZ_QUESTIONS)
 
 
-async def send_question_dict(
-    client,
-    question,
-):
+async def send_question_dict(link, question):
     """
-    Send one QUESTION packet (from the cache) to the device.
+    Send one QUESTION packet (from the cache) to a link.
+
+    The text fields are transliterated to ASCII for the
+    device font, then the packet is sent as ONE write when it
+    fits a chunk; longer packets are transferred fragmented
+    (QBEGIN announces the total byte count, the raw JSON
+    bytes follow in BLE_CHUNK_SIZE writes — the device
+    reassembles and parses them).
     """
-    global LAST_PUSHED_QUESTION
-    global PUSHED_AT
 
-    question_number = int(
-        question["question_number"]
-    )
-
+    question_number = int(question["question_number"])
     question_id = f"Q{question_number:02d}"
+
+    def field(name):
+        return to_device_ascii(question[name])
 
     packet = {
         "type": "QUESTION",
@@ -2072,61 +768,69 @@ async def send_question_dict(
         "question_id": question_id,
         "number": question_number,
         "total": len(QUIZ_QUESTIONS),
-        "question": question["question_text"],
-        "A": question["option_a"],
-        "B": question["option_b"],
-        "C": question["option_c"],
-        "D": question["option_d"],
+        "question": field("question_text"),
+        "A": field("option_a"),
+        "B": field("option_b"),
+        "C": field("option_c"),
+        "D": field("option_d"),
     }
 
     data = json.dumps(
-        packet,
-        separators=(",", ":"),
+        packet, separators=(",", ":"), ensure_ascii=False,
     ).encode("utf-8")
 
-    print()
-    print("======================================")
-    print("[QUESTION TX]")
-    print(f"Quiz ID  : {ACTIVE_QUIZ_ID}")
-    print(f"Question : {question_id}")
-    print("======================================")
-
     try:
-        question_char = get_characteristic(
-            client,
-            QUESTION_CHAR_UUID,
-        )
+        if len(data) <= BLE_CHUNK_SIZE:
+            await write_bytes(
+                link.client, QUESTION_CHAR_UUID, data,
+            )
+        else:
+            chunks = [
+                data[i:i + BLE_CHUNK_SIZE]
+                for i in range(0, len(data), BLE_CHUNK_SIZE)
+            ]
 
-        await client.write_gatt_char(
-            question_char,
-            data,
-            response=True,
-        )
+            await write_json(
+                link.client,
+                QUESTION_CHAR_UUID,
+                {
+                    "type": "QBEGIN",
+                    "bytes": len(data),
+                    "chunks": len(chunks),
+                },
+            )
 
-        LAST_PUSHED_QUESTION = question_number
-        PUSHED_AT = time.time()
+            for chunk in chunks:
+                await write_bytes(
+                    link.client, QUESTION_CHAR_UUID, chunk,
+                )
 
-        print(
-            "[OK] Question sent to device."
-        )
+                await asyncio.sleep(BLE_CHUNK_DELAY)
+
+            print(
+                f"[QFRAG] {link.address}: {len(data)} bytes "
+                f"in {len(chunks)} chunks."
+            )
+
+        link.last_pushed = question_number
+
+        print(f"[QUESTION TX] {link.address} <- {question_id}")
 
         return True
 
     except Exception as e:
         print(
-            f"[ERROR] Failed to send question: {e}"
+            f"[ERROR] Question push to {link.address} failed: {e}"
         )
 
         return False
 
 
-async def push_next_question(
-    client,
-    after_number,
-):
+async def push_next_question(link, after_number):
     """
-    Push the question right after `after_number`.
-    Returns False when there are no more questions.
+    Push the question right after `after_number` to ONE link
+    (self-paced advancing). Returns False when this student
+    has reached the last question.
     """
 
     if not await ensure_questions_cache():
@@ -2137,24 +841,507 @@ async def push_next_question(
 
         if number is not None and number > after_number:
             print(
-                f"[AUTO] Advancing to question "
-                f"{number}..."
+                f"[AUTO] {link.address} advancing to "
+                f"question {number}..."
             )
 
-            return await send_question_dict(
-                client,
-                question,
-            )
+            return await send_question_dict(link, question)
 
-    # All questions answered — the device stays on its
-    # "answered all, waiting" screen until the quiz time
-    # expires (or the teacher finishes the quiz), then the
-    # gateway sends QUIZ_END with the final result screen.
-    print(
-        "[AUTO] No more questions for this student."
-    )
+    print(f"[AUTO] {link.address}: no more questions.")
 
     return False
+
+
+async def resync_link_question(link):
+    """
+    After a (re)connect mid-quiz, push the question the
+    device's student should be on, based on what they have
+    already answered in the backend:
+        answered Qn -> push Q(n+1); no answers -> push Q1.
+    """
+
+    if ACTIVE_QUIZ_STATUS != "running":
+        return False
+
+    if not await ensure_questions_cache():
+        return False
+
+    after_number = 0
+
+    if link.student_id:
+        success, result = await asyncio.to_thread(
+            http_get_json_quiet,
+            f"{FASTAPI_URL}/api/quizzes/{ACTIVE_QUIZ_ID}/students",
+        )
+
+        if success and isinstance(result, dict):
+            for student in result.get("students", []):
+                if (
+                    str(student.get("student_id", ""))
+                    == link.student_id
+                ):
+                    after_number = int(
+                        student.get("last_answered_question") or 0
+                    )
+                    break
+
+    return await push_next_question(link, after_number)
+
+
+# ============================================================
+# QUIZ INFO / QUIZ END BROADCAST
+# ============================================================
+
+async def send_quiz_info(link):
+    """Tell one device which quiz is active."""
+
+    await ensure_questions_cache()
+
+    packet = {
+        "type": "QUIZ_INFO",
+        "quiz_id": ACTIVE_QUIZ_ID,
+        # Title in device-safe ASCII (the font has no
+        # Vietnamese glyphs).
+        "title": to_device_ascii(ACTIVE_QUIZ_TITLE),
+        "status": ACTIVE_QUIZ_STATUS,
+        "time_limit": ACTIVE_QUIZ_TIME_LIMIT,
+        "total": len(QUIZ_QUESTIONS),
+        "expected": ACTIVE_QUIZ_EXPECTED,
+        "prefix": ACTIVE_QUIZ_PREFIX,
+        "id_length": ACTIVE_QUIZ_ID_LENGTH,
+    }
+
+    try:
+        await write_json(link.client, ACK_CHAR_UUID, packet)
+
+        print(f"[INFO] QUIZ_INFO sent to {link.address}.")
+
+        return True
+
+    except Exception as e:
+        print(f"[ERROR] QUIZ_INFO to {link.address} failed: {e}")
+
+        return False
+
+
+async def broadcast_quiz_info():
+    for link in connected_links():
+        await send_quiz_info(link)
+
+
+async def send_quiz_end(link):
+    packet = {
+        "type": "QUIZ_END",
+        "quiz_id": ACTIVE_QUIZ_ID,
+    }
+
+    try:
+        await write_json(link.client, ACK_CHAR_UUID, packet)
+
+        print(f"[INFO] QUIZ_END sent to {link.address}.")
+
+        return True
+
+    except Exception as e:
+        print(f"[ERROR] QUIZ_END to {link.address} failed: {e}")
+
+        return False
+
+
+async def broadcast_quiz_end():
+    global QUIZ_END_SENT_QUIZ
+
+    for link in connected_links():
+        await send_quiz_end(link)
+
+    if ACTIVE_QUIZ_ID is not None:
+        QUIZ_END_SENT_QUIZ = ACTIVE_QUIZ_ID
+
+
+# ============================================================
+# REGISTRATION PROCESS
+# ESP32 -> Raspberry Pi -> FastAPI
+# ============================================================
+
+async def process_registration(link, message):
+    print(f"[REGISTRATION RECEIVED from {link.address}] {message}")
+
+    if not refresh_active_quiz():
+        await send_register_ack(link, "", "REJECTED", "NO_ACTIVE_QUIZ")
+        return
+
+    try:
+        packet = json.loads(message)
+    except json.JSONDecodeError as e:
+        print(f"[ERROR] Invalid JSON: {e}")
+        await send_register_ack(link, "", "REJECTED", "INVALID_JSON")
+        return
+
+    if packet.get("type") != "REGISTER":
+        await send_register_ack(
+            link, packet.get("student_id", ""), "REJECTED", "INVALID_TYPE"
+        )
+        return
+
+    student_id = str(packet.get("student_id", "")).strip()
+    device_mac = normalize_mac(packet.get("device_mac", ""))
+    device_name = str(packet.get("device_name", "")).strip()
+
+    print(
+        f"Student ID : {student_id}\n"
+        f"Device MAC : {device_mac}\n"
+        f"Quiz ID    : {ACTIVE_QUIZ_ID}"
+    )
+
+    if not student_id:
+        await send_register_ack(link, "", "REJECTED", "EMPTY_STUDENT_ID")
+        return
+
+    if not device_mac:
+        await send_register_ack(link, student_id, "REJECTED", "EMPTY_DEVICE_MAC")
+        return
+
+    success, result = register_device_with_fastapi(
+        student_id=student_id,
+        device_mac=device_mac,
+        device_name=device_name,
+        quiz_id=ACTIVE_QUIZ_ID,
+    )
+
+    if not success:
+        reason = "SERVER_REGISTRATION_FAILED"
+
+        if isinstance(result, dict):
+            detail = result.get("detail") or result.get("message")
+            if detail:
+                reason = detail if isinstance(detail, str) else str(detail)
+
+        await send_register_ack(link, student_id, "REJECTED", reason)
+        return
+
+    registered_devices[student_id] = {
+        "device_mac": device_mac,
+        "device_name": device_name,
+        "quiz_id": ACTIVE_QUIZ_ID,
+        "link": link,
+    }
+
+    link.student_id = student_id
+
+    # A student registering while the quiz already runs gets
+    # the question they should be on right away.
+    if ACTIVE_QUIZ_STATUS == "running":
+        await resync_link_question(link)
+
+    await send_register_ack(link, student_id, "ACCEPTED")
+
+
+# ============================================================
+# ANSWER PROCESS
+# ESP32 -> Raspberry Pi -> FastAPI
+# ============================================================
+
+async def process_answer(link, message):
+    print(f"[ANSWER RECEIVED from {link.address}] {message}")
+
+    try:
+        packet = json.loads(message)
+    except json.JSONDecodeError as e:
+        print(f"[ERROR] Invalid JSON: {e}")
+        await send_answer_ack(link, "", "REJECTED", "INVALID_JSON")
+        return
+
+    if packet.get("type") != "ANSWER":
+        await send_answer_ack(
+            link, str(packet.get("question_id", "")), "REJECTED", "INVALID_TYPE"
+        )
+        return
+
+    if ACTIVE_QUIZ_ID is None:
+        refresh_active_quiz()
+
+    if ACTIVE_QUIZ_ID is None:
+        await send_answer_ack(
+            link, str(packet.get("question_id", "")), "REJECTED", "NO_ACTIVE_QUIZ"
+        )
+        return
+
+    student_id = str(packet.get("student_id", "")).strip()
+    question_id = str(packet.get("question_id", "")).strip().upper()
+    answer = str(packet.get("answer", "")).strip().upper()
+
+    if not student_id:
+        await send_answer_ack(link, question_id, "REJECTED", "EMPTY_STUDENT_ID")
+        return
+
+    if not question_id:
+        await send_answer_ack(link, question_id, "REJECTED", "EMPTY_QUESTION_ID")
+        return
+
+    if answer not in ("A", "B", "C", "D"):
+        await send_answer_ack(link, question_id, "REJECTED", "INVALID_ANSWER")
+        return
+
+    # The device may have restarted or the gateway may have
+    # restarted — reload registrations from the database.
+    if student_id not in registered_devices:
+        reload_registered_devices_from_backend(ACTIVE_QUIZ_ID)
+
+    if student_id not in registered_devices:
+        await send_answer_ack(
+            link, question_id, "REJECTED", "STUDENT_NOT_REGISTERED"
+        )
+        return
+
+    device_info = registered_devices[student_id]
+
+    device_mac = normalize_mac(device_info["device_mac"])
+
+    if device_info.get("quiz_id") != ACTIVE_QUIZ_ID:
+        await send_answer_ack(
+            link, question_id, "REJECTED", "QUIZ_REGISTRATION_MISMATCH"
+        )
+        return
+
+    print(
+        f"Student ID : {student_id}\n"
+        f"Device MAC : {device_mac}\n"
+        f"Quiz ID    : {ACTIVE_QUIZ_ID}\n"
+        f"Question   : {question_id}\n"
+        f"Answer     : {answer}"
+    )
+
+    # Sequence: the device's rising attempt counter. Older
+    # firmware without it falls back to the question number
+    # (last-write-wins on the backend).
+    sequence = packet.get("sequence")
+
+    if sequence is None:
+        try:
+            sequence = int(str(question_id).replace("Q", ""))
+        except ValueError:
+            sequence = None
+
+    success, result = submit_answer_to_fastapi(
+        student_id=student_id,
+        device_mac=device_mac,
+        question_id=question_id,
+        answer=answer,
+        quiz_id=ACTIVE_QUIZ_ID,
+        sequence=sequence,
+    )
+
+    if not success:
+        reason = "SERVER_ANSWER_FAILED"
+
+        if isinstance(result, dict):
+            detail = result.get("detail") or result.get("status")
+            if detail:
+                reason = detail if isinstance(detail, str) else str(detail)
+
+        await send_answer_ack(link, question_id, "REJECTED", reason)
+        return
+
+    is_correct = bool(result.get("correct", False))
+
+    # ACCEPTED even for DUPLICATE/STALE_IGNORED results: the
+    # stored answer is authoritative and the device just needs
+    # its confirmation (e.g. after a lost ACK).
+    await send_answer_ack(
+        link,
+        question_id,
+        "ACCEPTED",
+        correct=is_correct,
+    )
+
+    # ------------------------------------------------
+    # SELF-PACED ADVANCE: push this student's next
+    # question right after the answer is accepted.
+    # ------------------------------------------------
+
+    try:
+        answered_number = int(str(question_id).replace("Q", ""))
+    except ValueError:
+        answered_number = link.last_pushed or 0
+
+    await push_next_question(link, answered_number)
+
+
+# ============================================================
+# PER-DEVICE CONNECTION SESSION
+# ============================================================
+
+def spawn(coro):
+    """
+    Run a callback task, logging instead of dying silently
+    when the BLE link drops mid-exchange.
+    """
+
+    async def runner():
+        try:
+            await coro
+        except Exception as e:
+            print(f"[ERROR] Callback task failed: {type(e).__name__}: {e}")
+
+    asyncio.create_task(runner())
+
+
+def make_registration_callback(link):
+    def callback(characteristic, data):
+        message = data.decode("utf-8", errors="replace")
+
+        if not link.connected:
+            print(f"[WARN] Packet from disconnected {link.address}, dropped.")
+            return
+
+        spawn(process_registration(link, message))
+
+    return callback
+
+
+def make_answer_callback(link):
+    def callback(characteristic, data):
+        message = data.decode("utf-8", errors="replace")
+
+        if not link.connected:
+            print(f"[WARN] Packet from disconnected {link.address}, dropped.")
+            return
+
+        spawn(process_answer(link, message))
+
+    return callback
+
+
+async def device_session(link):
+    """
+    Connect one device, subscribe, greet it, keep the link
+    alive. Returns when the link drops; the supervisor
+    reconnects on its next cycle.
+    """
+
+    link.connected = False
+
+    print(f"[BLE] Connecting to {link.address}...")
+
+    client = None
+
+    try:
+        # Serialize the connection START against the
+        # supervisor's scans (BlueZ InProgress errors).
+        async with ble_lock:
+            client = BleakClient(
+                link.address,
+                timeout=BLE_CONNECT_TIMEOUT,
+            )
+            await client.connect()
+
+        link.client = client
+        link.connected = True
+
+        print(f"[OK] BLE connected: {link.address}")
+
+        services = client.services
+
+        if services is None or services.get_characteristic(
+            REGISTRATION_CHAR_UUID
+        ) is None:
+            print(
+                f"[WARN] {link.address} does not expose the "
+                "PulseNet service — disconnecting."
+            )
+            return
+
+        await client.start_notify(
+            REGISTRATION_CHAR_UUID,
+            make_registration_callback(link),
+        )
+
+        await client.start_notify(
+            ANSWER_CHAR_UUID,
+            make_answer_callback(link),
+        )
+
+        # Greeting: the device turns its BLE icon on.
+        await write_json(
+            client,
+            ACK_CHAR_UUID,
+            {
+                "type": "ACK",
+                "status": "CONNECTED",
+                "quiz_id": ACTIVE_QUIZ_ID,
+                "session_id": ACTIVE_SESSION_ID,
+            },
+        )
+
+        # Fresh link state for the (possibly new) quiz:
+        # QUIZ_INFO first, then the right question if the
+        # quiz is already running (reconnect mid-quiz).
+        link.last_pushed = None
+
+        refresh_active_quiz()
+
+        if ACTIVE_QUIZ_ID is not None:
+            await send_quiz_info(link)
+            await resync_link_question(link)
+
+        # Keep the session alive until the link drops.
+        while client.is_connected:
+            await asyncio.sleep(2)
+
+        print(f"[WARN] BLE link lost: {link.address}")
+
+    except Exception as e:
+        print(
+            f"[WARN] BLE session for {link.address} ended: "
+            f"{type(e).__name__}: {e}"
+        )
+
+        # Pace the retries (a device that is off would
+        # otherwise be hammered every supervisor cycle).
+        await asyncio.sleep(RECONNECT_DELAY)
+
+    finally:
+        link.connected = False
+        link.client = None
+
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+
+
+async def supervisor_loop():
+    """
+    Discover PulseNet devices and keep one connection session
+    running per device.
+    """
+
+    while True:
+        try:
+            # Discover by service UUID (works for any number
+            # of devices advertising PulseNet). Serialized
+            # against connect starts — see ble_lock.
+            async with ble_lock:
+                devices = await BleakScanner.discover(
+                    service_uuids=[PULSENET_SERVICE_UUID.lower()],
+                    timeout=SCAN_TIMEOUT,
+                    return_adv=False,
+                )
+
+            for device in devices:
+                if device.address:
+                    get_or_create_link(device.address)
+
+            # (Re)start sessions for links without a live task.
+            for link in links.values():
+                if link.task is None or link.task.done():
+                    link.task = asyncio.create_task(device_session(link))
+
+        except Exception as e:
+            print(f"[ERROR] Supervisor loop: {type(e).__name__}: {e}")
+
+        await asyncio.sleep(SCAN_INTERVAL)
 
 
 # ============================================================
@@ -2163,59 +1350,40 @@ async def push_next_question(
 # ============================================================
 
 async def heartbeat_loop():
-    """
-    Report gateway status to FastAPI every HEARTBEAT_INTERVAL
-    seconds — including while waiting for the device to
-    appear — so the dashboard can tell "gateway running,
-    waiting for device" from "gateway not running".
-    """
     url = f"{FASTAPI_URL}/api/gateway/heartbeat"
 
     while True:
-        client = current_client
+        live = connected_links()
+
+        pushed = [
+            link.last_pushed
+            for link in live
+            if link.last_pushed is not None
+        ]
 
         payload = {
-            "connected": bool(
-                client is not None and client.is_connected
+            "connected": bool(live),
+            "device_address": (
+                live[0].address if live else ""
             ),
-            "device_address": DEVICE_ADDRESS,
             "quiz_id": ACTIVE_QUIZ_ID,
             "registered_count": len(registered_devices),
-            "last_pushed_question": LAST_PUSHED_QUESTION,
+            "last_pushed_question": max(pushed) if pushed else None,
+            "devices": [link.status() for link in links.values()],
         }
 
-        # to_thread: keep the event loop free for BLE events.
-        await asyncio.to_thread(
-            http_post_json_quiet,
-            url,
-            payload,
-        )
+        await asyncio.to_thread(http_post_json_quiet, url, payload)
 
         await asyncio.sleep(HEARTBEAT_INTERVAL)
 
 
 # ============================================================
 # BACKGROUND LOOP - QUIZ WATCH
-# FastAPI -> Gateway -> ESP32
-#
-# Watches quiz state on the backend:
-# - new quiz / start / time limit change -> send QUIZ_INFO
-# - quiz starts                          -> push question 1
-# - quiz time expires                    -> finish + QUIZ_END
-# - teacher finishes on the dashboard    -> QUIZ_END
-#
-# Self-paced advancing to the next question after each
-# answer is handled in process_answer -> push_next_question.
-#
-# NOTE: questions are NEVER re-pushed based on the backend's
-# current_question_number — that caused the device to jump
-# back to an old question while students worked ahead.
+# FastAPI -> Gateway -> every ESP32
 # ============================================================
 
 def parse_iso_utc(value):
-    """
-    '2026-10-07T19:35:18.485264' -> POSIX seconds (UTC).
-    """
+    """'2026-10-07T19:35:18' -> POSIX seconds (UTC)."""
     if not value:
         return None
 
@@ -2230,105 +1398,18 @@ def parse_iso_utc(value):
     return dt.timestamp()
 
 
-async def send_quiz_info(client):
+async def quiz_watch_loop():
     """
-    Tell the device which quiz is active:
-    title, status, time limit and total questions.
+    Watches quiz state on the backend:
+    - new quiz / start / time limit change -> broadcast QUIZ_INFO
+    - quiz starts                          -> push Q1 per device
+    - quiz time expires                    -> finish + QUIZ_END
+    - teacher finishes on the dashboard    -> QUIZ_END
+
+    Self-paced advancing after each answer happens in
+    process_answer -> push_next_question.
     """
-    global QUIZ_SENT_INFO_KEY
 
-    await ensure_questions_cache()
-
-    packet = {
-        "type": "QUIZ_INFO",
-        "quiz_id": ACTIVE_QUIZ_ID,
-        "title": ACTIVE_QUIZ_TITLE,
-        "status": ACTIVE_QUIZ_STATUS,
-        "time_limit": ACTIVE_QUIZ_TIME_LIMIT,
-        "total": len(QUIZ_QUESTIONS),
-        "expected": ACTIVE_QUIZ_EXPECTED,
-        "prefix": ACTIVE_QUIZ_PREFIX,
-        "id_length": ACTIVE_QUIZ_ID_LENGTH,
-    }
-
-    try:
-        ack_char = get_characteristic(
-            client,
-            ACK_CHAR_UUID,
-        )
-
-        await client.write_gatt_char(
-            ack_char,
-            json.dumps(
-                packet,
-                separators=(",", ":"),
-            ).encode("utf-8"),
-            response=True,
-        )
-
-        QUIZ_SENT_INFO_KEY = (
-            ACTIVE_QUIZ_ID,
-            ACTIVE_QUIZ_STATUS,
-            ACTIVE_QUIZ_TIME_LIMIT,
-            len(QUIZ_QUESTIONS),
-        )
-
-        print(
-            f"[INFO] QUIZ_INFO sent: {packet}"
-        )
-
-        return True
-
-    except Exception as e:
-        print(
-            f"[ERROR] QUIZ_INFO failed: {e}"
-        )
-
-        return False
-
-
-async def send_quiz_end(client):
-    """
-    Tell the device the quiz is over so it can show the
-    final result (correct count / total and score /10).
-    """
-    global QUIZ_END_SENT_QUIZ
-
-    packet = {
-        "type": "QUIZ_END",
-        "quiz_id": ACTIVE_QUIZ_ID,
-    }
-
-    try:
-        ack_char = get_characteristic(
-            client,
-            ACK_CHAR_UUID,
-        )
-
-        await client.write_gatt_char(
-            ack_char,
-            json.dumps(
-                packet,
-                separators=(",", ":"),
-            ).encode("utf-8"),
-            response=True,
-        )
-
-        QUIZ_END_SENT_QUIZ = ACTIVE_QUIZ_ID
-
-        print("[INFO] QUIZ_END sent to device.")
-
-        return True
-
-    except Exception as e:
-        print(
-            f"[ERROR] QUIZ_END failed: {e}"
-        )
-
-        return False
-
-
-async def quiz_watch_loop(client):
     global ACTIVE_QUIZ_ID
     global ACTIVE_SESSION_ID
     global ACTIVE_QUIZ_TITLE
@@ -2339,17 +1420,12 @@ async def quiz_watch_loop(client):
     global ACTIVE_QUIZ_ID_LENGTH
     global QUIZ_SENT_INFO_KEY
     global QUIZ_END_SENT_QUIZ
-    global LAST_PUSHED_QUESTION
     global QUIZ_QUESTIONS_QUIZ_ID
 
     quizzes_url = f"{FASTAPI_URL}/api/quizzes"
 
     while True:
         try:
-            if not client.is_connected:
-                await asyncio.sleep(QUIZ_POLL_INTERVAL)
-                continue
-
             success, quizzes = await asyncio.to_thread(
                 http_get_json_quiet,
                 quizzes_url,
@@ -2360,33 +1436,58 @@ async def quiz_watch_loop(client):
                 continue
 
             running = [
-                quiz
-                for quiz in quizzes
+                quiz for quiz in quizzes
                 if quiz.get("status") == "running"
             ]
 
             lobbies = [
-                quiz
-                for quiz in quizzes
+                quiz for quiz in quizzes
                 if quiz.get("status") == "lobby"
             ]
 
             drafts = [
-                quiz
-                for quiz in quizzes
+                quiz for quiz in quizzes
                 if quiz.get("status") == "draft"
             ]
 
+            # --------------------------------------------
+            # Followed quiz just FINISHED (teacher ended it
+            # early, or the backend expired it): notify the
+            # devices so they show the result screen.
+            # --------------------------------------------
+
+            if (
+                ACTIVE_QUIZ_ID is not None
+                and QUIZ_END_SENT_QUIZ != ACTIVE_QUIZ_ID
+            ):
+                followed = next(
+                    (
+                        q for q in quizzes
+                        if q.get("id") == ACTIVE_QUIZ_ID
+                    ),
+                    None,
+                )
+
+                if (
+                    followed is not None
+                    and followed.get("status") == "finished"
+                ):
+                    print(
+                        "[WATCH] Followed quiz finished — "
+                        "notifying devices."
+                    )
+
+                    await broadcast_quiz_end()
+
             # Priority: running > lobby > newest draft.
             if running:
+                running.sort(key=lambda q: q.get("id") or 0, reverse=True)
                 quiz = running[0]
             elif lobbies:
+                lobbies.sort(key=lambda q: q.get("id") or 0, reverse=True)
                 quiz = lobbies[0]
             elif drafts:
-                drafts.sort(
-                    key=lambda q: q.get("id") or 0,
-                    reverse=True,
-                )
+                drafts.sort(key=lambda q: q.get("id") or 0, reverse=True)
                 quiz = drafts[0]
             else:
                 quiz = None
@@ -2416,40 +1517,39 @@ async def quiz_watch_loop(client):
             id_length = quiz.get("id_length") or 0
 
             # --------------------------------------------
-            # Active quiz changed
+            # Active quiz changed: fresh session state.
             # --------------------------------------------
 
             if quiz_id != ACTIVE_QUIZ_ID:
                 ACTIVE_QUIZ_ID = quiz_id
                 ACTIVE_SESSION_ID = f"QUIZ-{quiz_id}"
-                ACTIVE_QUIZ_TITLE = title
                 ACTIVE_QUIZ_STATUS = status
-                ACTIVE_QUIZ_TIME_LIMIT = time_limit
-                ACTIVE_QUIZ_EXPECTED = expected
-                ACTIVE_QUIZ_PREFIX = prefix
-                ACTIVE_QUIZ_ID_LENGTH = id_length
-
-                # Force a question-cache reload.
-                QUIZ_QUESTIONS_QUIZ_ID = None
-                LAST_PUSHED_QUESTION = None
+                QUIZ_SENT_INFO_KEY = None
                 QUIZ_END_SENT_QUIZ = None
+                QUIZ_QUESTIONS_QUIZ_ID = None
+
+                # Devices re-register per quiz.
+                registered_devices.clear()
+
+                for link in links.values():
+                    link.student_id = None
+                    link.last_pushed = None
 
                 print(
                     f"[WATCH] Following quiz {quiz_id} "
                     f"'{title}' ({status})."
                 )
 
-            else:
-                ACTIVE_QUIZ_TITLE = title
-                ACTIVE_QUIZ_STATUS = status
-                ACTIVE_QUIZ_TIME_LIMIT = time_limit
-                ACTIVE_QUIZ_EXPECTED = expected
-                ACTIVE_QUIZ_PREFIX = prefix
-                ACTIVE_QUIZ_ID_LENGTH = id_length
+            ACTIVE_QUIZ_TITLE = title
+            ACTIVE_QUIZ_STATUS = status
+            ACTIVE_QUIZ_TIME_LIMIT = time_limit
+            ACTIVE_QUIZ_EXPECTED = expected
+            ACTIVE_QUIZ_PREFIX = prefix
+            ACTIVE_QUIZ_ID_LENGTH = id_length
 
             # --------------------------------------------
             # QUIZ_INFO whenever something changed
-            # (status, time limit, question count)
+            # (status, time limit, question count).
             # --------------------------------------------
 
             await ensure_questions_cache()
@@ -2462,13 +1562,13 @@ async def quiz_watch_loop(client):
             )
 
             if info_key != QUIZ_SENT_INFO_KEY:
-                # Force a question-cache reload so QUIZ_INFO
-                # and the Q1 push see fresh data.
                 QUIZ_QUESTIONS_QUIZ_ID = None
 
                 await ensure_questions_cache()
 
-                await send_quiz_info(client)
+                await broadcast_quiz_info()
+
+                QUIZ_SENT_INFO_KEY = info_key
 
             # --------------------------------------------
             # Running quiz lifecycle
@@ -2476,9 +1576,7 @@ async def quiz_watch_loop(client):
 
             if ACTIVE_QUIZ_STATUS == "running":
 
-                started = parse_iso_utc(
-                    quiz.get("started_at")
-                )
+                started = parse_iso_utc(quiz.get("started_at"))
 
                 deadline = (
                     started + ACTIVE_QUIZ_TIME_LIMIT
@@ -2488,10 +1586,11 @@ async def quiz_watch_loop(client):
 
                 if deadline and time.time() >= deadline:
                     print(
-                        "[WATCH] Quiz time expired — "
-                        "finishing quiz."
+                        "[WATCH] Quiz time expired — finishing quiz."
                     )
 
+                    # The backend enforces the deadline too;
+                    # whichever gets there first wins.
                     await asyncio.to_thread(
                         http_post_json_quiet,
                         f"{FASTAPI_URL}/api/quizzes/"
@@ -2500,629 +1599,154 @@ async def quiz_watch_loop(client):
                     )
 
                     if QUIZ_END_SENT_QUIZ != ACTIVE_QUIZ_ID:
-                        await send_quiz_end(client)
+                        await broadcast_quiz_end()
 
                     await asyncio.sleep(QUIZ_POLL_INTERVAL)
                     continue
 
-                # Push Q1 right after the quiz starts.
-                if (
-                    LAST_PUSHED_QUESTION is None
-                    and QUIZ_END_SENT_QUIZ != ACTIVE_QUIZ_ID
-                ):
-                    await ensure_questions_cache()
-
-                    if QUIZ_QUESTIONS:
-                        await send_question_dict(
-                            client,
-                            QUIZ_QUESTIONS[0],
-                        )
-
-            elif ACTIVE_QUIZ_STATUS == "finished":
-
+                # Give every connected device its starting
+                # point: Q1 for fresh/empty devices, or the
+                # question after the student's last stored
+                # answer (reconnect mid-quiz).
                 if QUIZ_END_SENT_QUIZ != ACTIVE_QUIZ_ID:
-                    print(
-                        "[WATCH] Quiz finished by teacher — "
-                        "notifying device."
-                    )
-
-                    await send_quiz_end(client)
+                    for link in connected_links():
+                        if link.last_pushed is None:
+                            await resync_link_question(link)
 
         except Exception as e:
-            print(
-                f"[ERROR] Quiz watch loop: {e}"
-            )
+            print(f"[ERROR] Quiz watch loop: {type(e).__name__}: {e}")
 
         await asyncio.sleep(QUIZ_POLL_INTERVAL)
 
 
 # ============================================================
-# SHOW REGISTERED DEVICES
+# STATUS PRINTOUTS (menu)
 # ============================================================
 
-def show_registered_devices():
-    print()
+def show_links():
+    print("\n======================================")
+    print("[DEVICE LINKS]")
     print("======================================")
+
+    if not links:
+        print("No devices discovered yet.")
+
+    for link in links.values():
+        state = "CONNECTED" if link.connected else "waiting"
+
+        print(
+            f"{link.address}  {state:<10}  "
+            f"student={link.student_id or '-'}  "
+            f"last_pushed={link.last_pushed}"
+        )
+
+    print("======================================")
+
+
+def show_registered_devices():
+    print("\n======================================")
     print("[REGISTERED DEVICES]")
     print("======================================")
 
     if not registered_devices:
-
-        print(
-            "No devices registered."
-        )
-
-        print(
-            "======================================"
-        )
-
+        print("No devices registered.")
         return
 
-    for student_id, info in (
-        registered_devices.items()
-    ):
-
+    for student_id, info in registered_devices.items():
         print(
-            f"Student ID : {student_id}"
-        )
-
-        print(
-            f"Device MAC : "
-            f"{info['device_mac']}"
-        )
-
-        print(
-            f"Device Name: "
-            f"{info['device_name']}"
-        )
-
-        print(
-            f"Quiz ID    : "
-            f"{info['quiz_id']}"
-        )
-
-        print(
+            f"Student ID : {student_id}\n"
+            f"Device MAC : {info['device_mac']}\n"
+            f"Quiz ID    : {info['quiz_id']}\n"
             "--------------------------------------"
         )
 
 
-# ============================================================
-# SHOW ACTIVE QUIZ
-# ============================================================
-
 def show_active_quiz():
-    print()
-    print("======================================")
+    print("\n======================================")
     print("[ACTIVE QUIZ]")
     print("======================================")
 
     if ACTIVE_QUIZ_ID is None:
-
-        print(
-            "No active quiz."
-        )
-
+        print("No active quiz.")
     else:
-
         print(
-            f"Quiz ID : {ACTIVE_QUIZ_ID}"
-        )
-
-        print(
-            f"Session : {ACTIVE_SESSION_ID}"
+            f"Quiz ID : {ACTIVE_QUIZ_ID}\n"
+            f"Title   : {ACTIVE_QUIZ_TITLE}\n"
+            f"Status  : {ACTIVE_QUIZ_STATUS}"
         )
 
     print("======================================")
 
 
 # ============================================================
-# SHOW BLE STATUS
+# MENU (interactive mode only)
 # ============================================================
 
-def show_ble_status(
-    client,
-):
-    print()
-    print("======================================")
-    print("[BLE STATUS]")
-    print("======================================")
-
-    if client.is_connected:
-
-        print(
-            "[STATUS] BLE connected."
-        )
-
-    else:
-
-        print(
-            "[STATUS] BLE disconnected."
-        )
-
-    print(
-        f"Device : {DEVICE_ADDRESS}"
-    )
-
-    print("======================================")
-
-
-# ============================================================
-# MENU
-# ============================================================
-
-def show_menu():
-    print()
-    print("======================================")
-    print("       PulseNet BLE Gateway")
-    print("======================================")
-
-    print(
-        "1. Refresh active quiz"
-    )
-
-    print(
-        "2. Show active quiz"
-    )
-
-    print(
-        "3. Send current question"
-    )
-
-    print(
-        "4. Send CONNECTED ACK"
-    )
-
-    print(
-        "5. Show registered devices"
-    )
-
-    print(
-        "6. Show BLE connection status"
-    )
-
-    print(
-        "7. Exit"
-    )
-
-    print(
-        "======================================"
-    )
-
-
-# ============================================================
-# MENU LOOP
-# ============================================================
-
-async def menu_loop(
-    client,
-):
+async def menu_loop():
     while True:
+        print("\n======================================")
+        print("       PulseNet BLE Gateway")
+        print("======================================")
+        print("1. Refresh active quiz")
+        print("2. Show active quiz")
+        print("3. Show device links")
+        print("4. Show registered devices")
+        print("5. Exit")
+        print("======================================")
 
-        show_menu()
-
-        choice = await asyncio.to_thread(
-            input,
-            "Select option: ",
-        )
-
-        choice = choice.strip()
-
-        # ----------------------------------------------------
-        # REFRESH ACTIVE QUIZ
-        # ----------------------------------------------------
+        choice = (await asyncio.to_thread(input, "Select option: ")).strip()
 
         if choice == "1":
-
             refresh_active_quiz()
-
-        # ----------------------------------------------------
-        # SHOW ACTIVE QUIZ
-        # ----------------------------------------------------
-
         elif choice == "2":
-
             show_active_quiz()
-
-        # ----------------------------------------------------
-        # SEND CURRENT QUESTION
-        # ----------------------------------------------------
-
         elif choice == "3":
-
-            await send_current_question(
-                client
-            )
-
-        # ----------------------------------------------------
-        # CONNECTED ACK
-        # ----------------------------------------------------
-
+            show_links()
         elif choice == "4":
-
-            if ACTIVE_QUIZ_ID is None:
-
-                refresh_active_quiz()
-
-            packet = {
-                "type": "ACK",
-                "status": "CONNECTED",
-                "quiz_id": ACTIVE_QUIZ_ID,
-                "session_id": ACTIVE_SESSION_ID,
-            }
-
-            await send_ack(
-                client,
-                json.dumps(
-                    packet,
-                    separators=(
-                        ",",
-                        ":",
-                    ),
-                ),
-            )
-
-        # ----------------------------------------------------
-        # REGISTERED DEVICES
-        # ----------------------------------------------------
-
-        elif choice == "5":
-
             show_registered_devices()
-
-        # ----------------------------------------------------
-        # BLE STATUS
-        # ----------------------------------------------------
-
-        elif choice == "6":
-
-            show_ble_status(
-                client
-            )
-
-        # ----------------------------------------------------
-        # EXIT
-        # ----------------------------------------------------
-
-        elif choice == "7":
-
-            print()
-            print(
-                "[INFO] Exiting gateway..."
-            )
-
-            break
-
+        elif choice == "5":
+            print("[INFO] Exiting gateway...")
+            return
         else:
+            print("[ERROR] Invalid option.")
 
-            print()
-            print(
-                "[ERROR] Invalid option."
-            )
-
-        await asyncio.sleep(
-            0.2
-        )
-
-
-# ============================================================
-# PRINT GATT SERVICES
-# ============================================================
-
-def print_gatt_services(
-    client,
-):
-    print()
-    print("======================================")
-    print("[GATT SERVICES]")
-    print("======================================")
-
-    for service in client.services:
-
-        print()
-        print(
-            f"Service: {service.uuid}"
-        )
-
-        for char in (
-            service.characteristics
-        ):
-
-            print(
-                f"  Characteristic: "
-                f"{char.uuid}"
-            )
-
-            print(
-                f"    Properties: "
-                f"{char.properties}"
-            )
-
-    print(
-        "======================================"
-    )
+        await asyncio.sleep(0.2)
 
 
 # ============================================================
 # MAIN
 # ============================================================
 
-async def run_gateway_session():
-    global current_client
-    global LAST_PUSHED_QUESTION
-
+async def main():
     print("======================================")
     print("       PulseNet BLE Gateway")
     print("======================================")
-
-    print(
-        f"Target device: {DEVICE_ADDRESS}"
-    )
-
-    print(
-        f"FastAPI      : {FASTAPI_URL}"
-    )
-
+    print(f"FastAPI      : {FASTAPI_URL}")
+    print(f"Service UUID : {PULSENET_SERVICE_UUID}")
+    print(f"Seeded device: {DEVICE_ADDRESS}")
     print("======================================")
 
-    try:
+    asyncio.create_task(heartbeat_loop())
+    asyncio.create_task(quiz_watch_loop())
+    asyncio.create_task(supervisor_loop())
 
-        async with BleakClient(
-            DEVICE_ADDRESS
-        ) as client:
-
-            current_client = client
-
-            # Re-push the current question after every
-            # (re)connect so the device is never left behind.
-            LAST_PUSHED_QUESTION = None
-
-            # ------------------------------------------------
-            # BLE CONNECTED
-            # ------------------------------------------------
-
-            print()
-            print(
-                "[OK] BLE connected."
-            )
-
-            # ------------------------------------------------
-            # GATT SERVICES
-            # ------------------------------------------------
-
-            print_gatt_services(
-                client
-            )
-
-            # ------------------------------------------------
-            # INITIAL QUIZ DISCOVERY
-            # ------------------------------------------------
-
-            print()
-            print(
-                "[INFO] Checking active quiz..."
-            )
-
-            refresh_active_quiz()
-
-            # ------------------------------------------------
-            # REGISTRATION NOTIFICATION
-            # ------------------------------------------------
-
-            print()
-            print(
-                "[INFO] Subscribing to "
-                "registration notifications..."
-            )
-
-            await client.start_notify(
-                REGISTRATION_CHAR_UUID,
-                registration_callback,
-            )
-
-            # ------------------------------------------------
-            # ANSWER NOTIFICATION
-            # ------------------------------------------------
-
-            print(
-                "[INFO] Subscribing to "
-                "answer notifications..."
-            )
-
-            await client.start_notify(
-                ANSWER_CHAR_UUID,
-                answer_callback,
-            )
-
-            print(
-                "[OK] Notification handlers enabled."
-            )
-
-            # ------------------------------------------------
-            # INITIAL CONNECTED ACK
-            # ------------------------------------------------
-
-            packet = {
-                "type": "ACK",
-                "status": "CONNECTED",
-                "quiz_id": ACTIVE_QUIZ_ID,
-                "session_id": ACTIVE_SESSION_ID,
-            }
-
-            await send_ack(
-                client,
-                json.dumps(
-                    packet,
-                    separators=(
-                        ",",
-                        ":",
-                    ),
-                ),
-            )
-
-            # ------------------------------------------------
-            # GATEWAY READY
-            # ------------------------------------------------
-
-            print()
-            print("======================================")
-            print("       Gateway is running")
-            print("======================================")
-
-            if ACTIVE_QUIZ_ID is None:
-
-                print(
-                    "No quiz is currently running."
-                )
-
-                print(
-                    "Start a quiz from Teacher Web."
-                )
-
-            else:
-
-                print(
-                    f"Active Quiz ID: "
-                    f"{ACTIVE_QUIZ_ID}"
-                )
-
-                print(
-                    "Waiting for Student ID registration."
-                )
-
-            print("======================================")
-
-            # ------------------------------------------------
-            # BACKGROUND LOOP (auto question push)
-            # (heartbeat runs globally from main(), so it
-            # keeps reporting even between reconnects)
-            # ------------------------------------------------
-
-            push_task = asyncio.create_task(
-                quiz_watch_loop(client)
-            )
-
-            # ------------------------------------------------
-            # RUN: interactive menu, or headless forever
-            # ------------------------------------------------
-
-            try:
-                if INTERACTIVE:
-                    await menu_loop(client)
-                else:
-                    print(
-                        "[INFO] Headless mode — "
-                        "questions are pushed to the device "
-                        "automatically. Ctrl+C to stop."
-                    )
-
-                    while True:
-                        if not client.is_connected:
-                            raise RuntimeError(
-                                "BLE device disconnected"
-                            )
-
-                        await asyncio.sleep(2)
-
-            finally:
-                push_task.cancel()
-
-            # ------------------------------------------------
-            # CLEANUP
-            # ------------------------------------------------
-
-            try:
-
-                await client.stop_notify(
-                    REGISTRATION_CHAR_UUID
-                )
-
-            except Exception:
-                pass
-
-            try:
-
-                await client.stop_notify(
-                    ANSWER_CHAR_UUID
-                )
-
-            except Exception:
-                pass
-
-            current_client = None
-
-            print()
-            print(
-                "[INFO] BLE notifications stopped."
-            )
-
-    except Exception as e:
-
-        current_client = None
-
-        print()
-        print("======================================")
-        print("[WARN] BLE session ended")
-        print("======================================")
-
+    if INTERACTIVE:
+        await menu_loop()
+    else:
         print(
-            f"Type   : {type(e).__name__}"
+            "[INFO] Headless mode — devices are discovered and "
+            "served automatically. Ctrl+C to stop."
         )
 
-        print(
-            f"Reason : {e}"
-        )
+        while True:
+            await asyncio.sleep(3600)
 
-        print(
-            "======================================"
-        )
-
-        raise
-
-
-# ============================================================
-# MAIN LOOP
-# Connect -> run -> auto-reconnect on loss
-# ============================================================
-
-async def main():
-    # Global heartbeat: reports "running" even while waiting
-    # for the device to appear or reconnecting.
-    heartbeat_task = asyncio.create_task(
-        heartbeat_loop()
-    )
-
-    while True:
-        try:
-            await run_gateway_session()
-
-            # Session ended via menu option 7 — clean stop.
-            heartbeat_task.cancel()
-            return
-
-        except Exception:
-            print(
-                f"[INFO] Reconnecting in "
-                f"{RECONNECT_DELAY}s..."
-            )
-
-            await asyncio.sleep(RECONNECT_DELAY)
-
-
-# ============================================================
-# PROGRAM ENTRY
-# ============================================================
 
 if __name__ == "__main__":
-
     try:
-
-        asyncio.run(
-            main()
-        )
+        asyncio.run(main())
 
     except KeyboardInterrupt:
-
-        print()
-        print("======================================")
+        print("\n======================================")
         print("[INFO] Gateway stopped by user.")
         print("======================================")

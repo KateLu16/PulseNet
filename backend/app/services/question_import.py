@@ -4,6 +4,10 @@ import io
 from sqlalchemy.orm import Session
 
 from app.models.question import Question
+from app.schemas.question import (
+    OPTION_MAX_LENGTH,
+    QUESTION_TEXT_MAX_LENGTH,
+)
 
 
 EXPECTED_HEADERS = [
@@ -197,17 +201,21 @@ def import_questions_from_csv(
         start=2,
     ):
 
+        # Short rows make DictReader yield None for the
+        # missing trailing columns — treat them as empty
+        # so validation reports them instead of crashing.
+
         question_text = (
-            row["Question"].strip()
+            (row.get("Question") or "").strip()
         )
 
-        option_a = row["A"].strip()
-        option_b = row["B"].strip()
-        option_c = row["C"].strip()
-        option_d = row["D"].strip()
+        option_a = (row.get("A") or "").strip()
+        option_b = (row.get("B") or "").strip()
+        option_c = (row.get("C") or "").strip()
+        option_d = (row.get("D") or "").strip()
 
         correct_answer = (
-            row["Correct Answer"]
+            (row.get("Correct Answer") or "")
             .strip()
             .upper()
         )
@@ -236,6 +244,35 @@ def import_questions_from_csv(
                         "row": row_number,
                         "field": field_name,
                         "message": "Field cannot be empty",
+                    }
+                )
+
+                row_has_error = True
+
+        # ====================================================
+        # VALIDATE LENGTH (device display buffer budget)
+        # ====================================================
+
+        max_lengths = {
+            "Question": QUESTION_TEXT_MAX_LENGTH,
+            "A": OPTION_MAX_LENGTH,
+            "B": OPTION_MAX_LENGTH,
+            "C": OPTION_MAX_LENGTH,
+            "D": OPTION_MAX_LENGTH,
+        }
+
+        for field_name, limit in max_lengths.items():
+
+            if len(fields[field_name]) > limit:
+
+                errors.append(
+                    {
+                        "row": row_number,
+                        "field": field_name,
+                        "message": (
+                            f"Too long: {len(fields[field_name])} "
+                            f"characters (max {limit})"
+                        ),
                     }
                 )
 

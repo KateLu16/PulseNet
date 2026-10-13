@@ -1,5 +1,6 @@
 
 import time
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -13,6 +14,10 @@ from app.models.quiz import Quiz
 from app.models.quiz_registration import QuizRegistration
 from app.models.response import Response
 from app.models.student import Student
+from app.services.quiz_lifecycle import (
+    finalize_expired_quiz,
+    finalize_expired_quizzes,
+)
 
 
 router = APIRouter(
@@ -27,7 +32,7 @@ router = APIRouter(
 # The BLE gateway (gateway/send_ack.py) POSTs a heartbeat
 # every 2 seconds. The teacher dashboard polls
 # /api/gateway/status to show whether the gateway is
-# running and whether a device is connected over BLE.
+# running and which devices are connected over BLE.
 #
 # State is kept in memory: it is transient by nature and
 # the gateway re-populates it within seconds of a backend
@@ -36,10 +41,29 @@ router = APIRouter(
 
 GATEWAY_OFFLINE_AFTER_SECONDS = 6.0
 
+# A device counts as online only while the gateway reports
+# it connected — plus this freshness window on last_seen, so
+# a dead gateway does not leave every device stuck "online".
+DEVICE_ONLINE_TIMEOUT_SEC = 30
+
 _gateway_state = {
     "last_seen": 0.0,
     "payload": {},
 }
+
+
+class GatewayDeviceHeartbeat(BaseModel):
+    # BLE address of the student device (ESP32 BLE MAC).
+    address: str = ""
+
+    # BLE link state as seen by the gateway.
+    connected: bool = False
+
+    # Student logged in on that device (when known).
+    student_id: str | None = None
+
+    # Last question number pushed to that device.
+    last_pushed_question: int | None = None
 
 
 class GatewayHeartbeat(BaseModel):
@@ -49,11 +73,59 @@ class GatewayHeartbeat(BaseModel):
     registered_count: int = 0
     last_pushed_question: int | None = None
 
+    # Multi-device gateway: per-device BLE link states.
+    # Older single-device gateboards keep sending the flat
+    # fields above; `devices` defaults to empty.
+    devices: list[GatewayDeviceHeartbeat] = []
+
 
 @router.post("/gateway/heartbeat")
-def gateway_heartbeat(data: GatewayHeartbeat):
+def gateway_heartbeat(
+    data: GatewayHeartbeat,
+    db: Session = Depends(get_db),
+):
     _gateway_state["last_seen"] = time.time()
     _gateway_state["payload"] = data.model_dump()
+
+    # --------------------------------------------------------
+    # Device online/offline bookkeeping.
+    #
+    # The gateway is the only one that knows the live BLE
+    # link state. Device.status used to be set to "online"
+    # on first answer and never cleared — devices stayed
+    # "online" forever. Sync the column here instead:
+    #
+    #   connected link   -> online + last_seen refreshed
+    #   missing link     -> offline
+    # --------------------------------------------------------
+
+    connected_macs = {
+        dev.address.strip().upper()
+        for dev in data.devices
+        if dev.connected and dev.address
+    }
+
+    if connected_macs:
+        db.query(Device).filter(
+            Device.device_mac.in_(connected_macs)
+        ).update(
+            {
+                "status": "online",
+                "last_seen": datetime.utcnow(),
+            },
+            synchronize_session=False,
+        )
+
+    db.query(Device).filter(
+        Device.status == "online",
+        Device.device_mac.notin_(connected_macs),
+    ).update(
+        {"status": "offline"},
+        synchronize_session=False,
+    )
+
+    db.commit()
+
     return {"ok": True}
 
 
@@ -62,6 +134,20 @@ def gateway_status():
     payload = dict(_gateway_state["payload"])
     age = time.time() - _gateway_state["last_seen"]
     online = age < GATEWAY_OFFLINE_AFTER_SECONDS
+
+    devices = payload.get("devices") or []
+
+    # Keep the flat single-device fields working for the
+    # dashboard: "connected" = at least one BLE link up.
+    if devices:
+        payload["connected"] = any(
+            dev.get("connected") for dev in devices
+        )
+        payload["device_address"] = ", ".join(
+            dev.get("address", "")
+            for dev in devices
+            if dev.get("connected")
+        )
 
     return {
         "online": online,
@@ -87,6 +173,8 @@ def get_quiz_students(
             status_code=404,
             detail="Quiz not found",
         )
+
+    finalize_expired_quiz(db, quiz)
 
     # Aggregate response statistics per student for this quiz.
     response_stats = (
@@ -155,6 +243,11 @@ def get_quiz_students(
 
     rows = db.execute(stmt).all()
 
+    now = datetime.utcnow()
+    online_cutoff = now - timedelta(
+        seconds=DEVICE_ONLINE_TIMEOUT_SEC
+    )
+
     students = []
 
     for row in rows:
@@ -162,10 +255,21 @@ def get_quiz_students(
         correct_count = int(row.correct_count or 0)
         wrong_count = max(answered_count - correct_count, 0)
 
+        # Unanswered questions = blanks (not wrong answers).
+        blank_count = max(total_questions - answered_count, 0)
+
         score = (
             round(correct_count / total_questions * 10, 2)
             if total_questions > 0
             else 0
+        )
+
+        # A device is online only when the BLE link is fresh;
+        # the stored column alone can go stale.
+        device_online = (
+            row.device_status == "online"
+            and row.last_seen is not None
+            and row.last_seen >= online_cutoff
         )
 
         students.append(
@@ -174,13 +278,14 @@ def get_quiz_students(
                 "name": row.name,
                 "device_mac": row.device_mac,
                 "device_code": row.device_code,
-                "device_status": row.device_status,
+                "device_status": "online" if device_online else "offline",
                 "battery": row.battery,
                 "last_seen": row.last_seen,
                 "registered_at": row.registered_at,
                 "answered_count": answered_count,
                 "correct_count": correct_count,
                 "wrong_count": max(answered_count - correct_count, 0),
+                "blank_count": blank_count,
                 "total_questions": total_questions,
                 "score": score,
                 # Highest question number the student has
@@ -314,14 +419,27 @@ def get_all_devices(
 
     rows = db.execute(stmt).all()
 
+    now = datetime.utcnow()
+    online_cutoff = now - timedelta(
+        seconds=DEVICE_ONLINE_TIMEOUT_SEC
+    )
+
     devices = []
 
     for row in rows:
+        # Online = status column AND a fresh heartbeat-driven
+        # last_seen; a stale "online" flag shows as offline.
+        online = (
+            row.status == "online"
+            and row.last_seen is not None
+            and row.last_seen >= online_cutoff
+        )
+
         devices.append(
             {
                 "device_mac": row.device_mac,
                 "device_code": row.device_code,
-                "status": row.status,
+                "status": "online" if online else "offline",
                 "battery": row.battery,
                 "last_seen": row.last_seen,
                 "created_at": row.created_at,
@@ -335,101 +453,118 @@ def get_all_devices(
 
 
 # ============================================================
-# LIVE PROGRESS OF CURRENT QUESTION
+# SYSTEM OVERVIEW
+#
+# Aggregated numbers for the teacher Dashboard page:
+# students, quizzes by status, questions, devices and
+# answer accuracy — plus the recent quiz sessions with
+# per-quiz student counts (one call instead of N).
 # ============================================================
 
-@router.get("/quizzes/{quiz_id}/responses/current")
-def get_current_question_progress(
-    quiz_id: int,
+@router.get("/stats/overview")
+def get_stats_overview(
     db: Session = Depends(get_db),
 ):
-    """
-    Live answering progress for the current question of a quiz.
+    finalize_expired_quizzes(db)
 
-    Used by the teacher dashboard while the quiz is running:
-    - how many students are registered
-    - how many already answered the current question
-    - who answered (student id + time)
-    """
-    quiz = db.get(Quiz, quiz_id)
+    total_students = db.scalar(
+        select(func.count()).select_from(Student)
+    ) or 0
 
-    if quiz is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Quiz not found",
-        )
+    total_quizzes = db.scalar(
+        select(func.count()).select_from(Quiz)
+    ) or 0
 
-    total_registered = (
-        db.query(func.count(QuizRegistration.id))
-        .filter(
-            QuizRegistration.quiz_id == quiz_id,
-        )
-        .scalar()
-        or 0
+    active_quizzes = db.scalar(
+        select(func.count())
+        .select_from(Quiz)
+        .where(Quiz.status.in_(("lobby", "running")))
+    ) or 0
+
+    finished_quizzes = db.scalar(
+        select(func.count())
+        .select_from(Quiz)
+        .where(Quiz.status == "finished")
+    ) or 0
+
+    total_questions = db.scalar(
+        select(func.count()).select_from(Question)
+    ) or 0
+
+    devices_total = db.scalar(
+        select(func.count()).select_from(Device)
+    ) or 0
+
+    online_cutoff = datetime.utcnow() - timedelta(
+        seconds=DEVICE_ONLINE_TIMEOUT_SEC
     )
 
-    def empty_result():
-        return {
-            "quiz_id": quiz_id,
-            "quiz_status": quiz.status,
-            "question": None,
-            "total_registered": total_registered,
-            "answered_count": 0,
-            "answered_students": [],
-        }
-
-    if quiz.status != "running":
-        return empty_result()
-
-    if quiz.current_question_number is None:
-        return empty_result()
-
-    question = (
-        db.query(Question)
-        .filter(
-            Question.quiz_id == quiz_id,
-            Question.question_number
-            == quiz.current_question_number,
+    devices_online = db.scalar(
+        select(func.count())
+        .select_from(Device)
+        .where(
+            Device.status == "online",
+            Device.last_seen >= online_cutoff,
         )
-        .first()
+    ) or 0
+
+    total_responses = db.scalar(
+        select(func.count()).select_from(Response)
+    ) or 0
+
+    correct_responses = db.scalar(
+        select(func.count())
+        .select_from(Response)
+        .where(Response.is_correct.is_(True))
+    ) or 0
+
+    overall_accuracy = (
+        round(correct_responses / total_responses * 100, 2)
+        if total_responses > 0
+        else 0.0
     )
 
-    if question is None:
-        return empty_result()
+    # Recent sessions with per-quiz student counts.
+    student_counts = dict(
+        db.execute(
+            select(
+                QuizRegistration.quiz_id,
+                func.count(QuizRegistration.id),
+            ).group_by(QuizRegistration.quiz_id)
+        ).all()
+    )
 
-    rows = (
-        db.query(Response, Student.name)
-        .outerjoin(
-            Student,
-            Student.student_id == Response.student_id,
-        )
-        .filter(
-            Response.quiz_id == quiz_id,
-            Response.question_id == question.id,
-        )
-        .order_by(Response.answered_at.asc())
+    quizzes = (
+        db.query(Quiz)
+        .order_by(Quiz.id.desc())
+        .limit(8)
         .all()
     )
 
-    answered_students = [
+    recent_sessions = [
         {
-            "student_id": response.student_id,
-            "name": name,
-            "answer": response.answer,
-            "answered_at": response.answered_at,
+            "id": quiz.id,
+            "title": quiz.title,
+            "status": quiz.status,
+            "started_at": quiz.started_at,
+            "finished_at": quiz.finished_at,
+            "student_count": student_counts.get(quiz.id, 0),
         }
-        for response, name in rows
+        for quiz in quizzes
     ]
 
     return {
-        "quiz_id": quiz_id,
-        "quiz_status": quiz.status,
-        "question": {
-            "question_id": question.id,
-            "question_number": question.question_number,
-            "question_text": question.question_text,
-        },
-        "total_registered": total_registered,
-        "answered_count": len(answered_students),
-        "answered_students": answered_students,
+        "total_students": total_students,
+        "total_quizzes": total_quizzes,
+        "active_quizzes": active_quizzes,
+        "finished_quizzes": finished_quizzes,
+        "total_questions": total_questions,
+        "devices_total": devices_total,
+        "devices_online": devices_online,
+        "total_responses": total_responses,
+        "correct_responses": correct_responses,
+        "overall_accuracy": overall_accuracy,
+        "recent_sessions": recent_sessions,
     }
+
+

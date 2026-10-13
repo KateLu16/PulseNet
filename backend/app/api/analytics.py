@@ -94,6 +94,13 @@ def get_quiz_results(
 
         wrong_count = answered_count - correct_count
 
+        # Questions the student never answered = blanks.
+        # Blanks are NOT wrong answers: the score divisor is
+        # total_questions, but the report shows both apart.
+        blank_count = max(
+            total_questions - answered_count, 0
+        )
+
         if total_questions > 0:
             score = round(
                 (correct_count / total_questions) * 10,
@@ -120,6 +127,7 @@ def get_quiz_results(
                 "total_questions": total_questions,
                 "correct_count": correct_count,
                 "wrong_count": wrong_count,
+                "blank_count": blank_count,
                 "score": score,
                 "accuracy": accuracy,
             }

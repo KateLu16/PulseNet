@@ -80,7 +80,60 @@ def register_device(
         db.flush()
 
     # --------------------------------------------------------
-    # 3. Find device by MAC
+    # 3. Resolve the device code (display label)
+    #
+    # The MAC is the device IDENTITY; the code is only a
+    # label shown on the dashboard. A fleet flashed with
+    # identical firmware reports the SAME code from every
+    # board, which would crash on the devices.device_code
+    # UNIQUE constraint (or block the student behind a 400).
+    # Resolve collisions by deriving a code from the MAC
+    # instead — never reject a registration over a label.
+    # --------------------------------------------------------
+
+    def mac_derived_code(mac: str) -> str:
+        suffix = mac.replace(":", "").upper()[-4:]
+        return f"PULSENET-{suffix}" if suffix else mac
+
+    device_code = data.device_code
+
+    if device_code is not None:
+
+        other = (
+            db.query(Device)
+            .filter(
+                Device.device_code == device_code
+            )
+            .first()
+        )
+
+        if (
+            other is not None
+            and other.device_mac.upper()
+            != data.device_mac.upper()
+        ):
+            device_code = mac_derived_code(data.device_mac)
+
+            # The derived code must not itself collide with a
+            # manually assigned label — the full MAC is
+            # guaranteed unique (devices.device_mac UNIQUE).
+            other = (
+                db.query(Device)
+                .filter(
+                    Device.device_code == device_code
+                )
+                .first()
+            )
+
+            if (
+                other is not None
+                and other.device_mac.upper()
+                != data.device_mac.upper()
+            ):
+                device_code = data.device_mac
+
+    # --------------------------------------------------------
+    # 4. Find device by MAC
     # --------------------------------------------------------
 
     device = (
@@ -95,7 +148,7 @@ def register_device(
 
         device = Device(
             device_mac=data.device_mac,
-            device_code=data.device_code,
+            device_code=device_code,
             status="online",
             last_seen=datetime.utcnow(),
         )
@@ -111,36 +164,8 @@ def register_device(
         device.status = "online"
         device.last_seen = datetime.utcnow()
 
-        if data.device_code is not None:
-            device.device_code = data.device_code
-
-    # --------------------------------------------------------
-    # 4. Check device-code conflict
-    # --------------------------------------------------------
-
-    if data.device_code is not None:
-
-        device_with_same_code = (
-            db.query(Device)
-            .filter(
-                Device.device_code
-                == data.device_code
-            )
-            .first()
-        )
-
-        if (
-            device_with_same_code is not None
-            and device_with_same_code.id
-            != device.id
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Device code is already "
-                    "registered to another device"
-                ),
-            )
+        if device_code is not None:
+            device.device_code = device_code
 
     # --------------------------------------------------------
     # 5. Check existing registration

@@ -11,6 +11,10 @@ from app.schemas.quiz import (
     QuizResponse,
     QuizSetupRequest,
 )
+from app.services.quiz_lifecycle import (
+    finalize_expired_quiz,
+    finalize_expired_quizzes,
+)
 
 
 router = APIRouter(
@@ -55,6 +59,10 @@ def create_quiz(
 def get_quizzes(
     db: Session = Depends(get_db),
 ):
+    # Lazy expiry so the dashboard reflects the backend-owned
+    # deadline even when the BLE gateway is down.
+    finalize_expired_quizzes(db)
+
     return (
         db.query(Quiz)
         .order_by(Quiz.id.desc())
@@ -85,6 +93,8 @@ def get_quiz(
             status_code=404,
             detail="Quiz not found",
         )
+
+    finalize_expired_quiz(db, quiz)
 
     return quiz
 
@@ -274,27 +284,30 @@ def start_quiz(
             detail="Quiz has already finished",
         )
 
-    # Find the first question
-    first_question = (
+    has_questions = (
         db.query(Question)
         .filter(
             Question.quiz_id == quiz_id,
         )
-        .order_by(
-            Question.question_number.asc()
-        )
         .first()
+        is not None
     )
 
-    if first_question is None:
+    if not has_questions:
         raise HTTPException(
             status_code=400,
             detail="Quiz has no questions",
         )
 
-    # Start quiz
+    # --------------------------------------------------------
+    # SELF-PACED MODEL: there is no teacher-driven "current
+    # question". Every device receives Q1 at start and then
+    # advances on its own after each accepted answer, so the
+    # shared current_question_number pointer is not used.
+    # --------------------------------------------------------
+
     quiz.status = "running"
-    quiz.current_question_number = first_question.question_number
+    quiz.current_question_number = None
     quiz.started_at = datetime.utcnow()
     quiz.finished_at = None
 
@@ -305,165 +318,7 @@ def start_quiz(
         "quiz_id": quiz.id,
         "title": quiz.title,
         "status": quiz.status,
-        "current_question_number": quiz.current_question_number,
         "started_at": quiz.started_at,
-    }
-
-
-# ============================================================
-# GET CURRENT QUESTION
-# ============================================================
-
-@router.get(
-    "/{quiz_id}/current",
-)
-def get_current_question(
-    quiz_id: int,
-    db: Session = Depends(get_db),
-):
-    quiz = (
-        db.query(Quiz)
-        .filter(Quiz.id == quiz_id)
-        .first()
-    )
-
-    if quiz is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Quiz not found",
-        )
-
-    if quiz.status != "running":
-        raise HTTPException(
-            status_code=400,
-            detail="Quiz is not running",
-        )
-
-    if quiz.current_question_number is None:
-        raise HTTPException(
-            status_code=400,
-            detail="No current question",
-        )
-
-    question = (
-        db.query(Question)
-        .filter(
-            Question.quiz_id == quiz_id,
-            Question.question_number
-            == quiz.current_question_number,
-        )
-        .first()
-    )
-
-    if question is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Current question not found",
-        )
-
-    # IMPORTANT:
-    # Do NOT send correct_answer to the student-facing API.
-    return {
-        "quiz_id": quiz.id,
-        "question_id": question.id,
-        "question_number": question.question_number,
-        "question_text": question.question_text,
-        "option_a": question.option_a,
-        "option_b": question.option_b,
-        "option_c": question.option_c,
-        "option_d": question.option_d,
-    }
-
-
-# ============================================================
-# NEXT QUESTION
-# ============================================================
-
-@router.post(
-    "/{quiz_id}/next",
-)
-def next_question(
-    quiz_id: int,
-    db: Session = Depends(get_db),
-):
-    quiz = (
-        db.query(Quiz)
-        .filter(Quiz.id == quiz_id)
-        .first()
-    )
-
-    if quiz is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Quiz not found",
-        )
-
-    if quiz.status != "running":
-        raise HTTPException(
-            status_code=400,
-            detail="Quiz is not running",
-        )
-
-    if quiz.current_question_number is None:
-        raise HTTPException(
-            status_code=400,
-            detail="No current question",
-        )
-
-    # Find the next question by question_number
-    next_question = (
-        db.query(Question)
-        .filter(
-            Question.quiz_id == quiz_id,
-            Question.question_number
-            > quiz.current_question_number,
-        )
-        .order_by(
-            Question.question_number.asc()
-        )
-        .first()
-    )
-
-    # No more questions
-    if next_question is None:
-        return {
-            "quiz_id": quiz.id,
-            "status": quiz.status,
-            "current_question_number":
-                quiz.current_question_number,
-            "has_next": False,
-            "message": "No more questions",
-        }
-
-    # Move to next question
-    quiz.current_question_number = (
-        next_question.question_number
-    )
-
-    db.commit()
-    db.refresh(quiz)
-
-    return {
-        "quiz_id": quiz.id,
-        "status": quiz.status,
-        "current_question_number":
-            quiz.current_question_number,
-        "has_next": True,
-        "question": {
-            "question_id": next_question.id,
-            "question_number":
-                next_question.question_number,
-            "question_text":
-                next_question.question_text,
-            "option_a":
-                next_question.option_a,
-            "option_b":
-                next_question.option_b,
-            "option_c":
-                next_question.option_c,
-            "option_d":
-                next_question.option_d,
-        },
     }
 
 
@@ -506,8 +361,6 @@ def finish_quiz(
         "quiz_id": quiz.id,
         "title": quiz.title,
         "status": quiz.status,
-        "current_question_number":
-            quiz.current_question_number,
         "started_at": quiz.started_at,
         "finished_at": quiz.finished_at,
     }

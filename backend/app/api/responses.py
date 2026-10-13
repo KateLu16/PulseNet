@@ -14,6 +14,7 @@ from app.schemas.response import (
     AnswerCreateRequest,
     AnswerResponse,
 )
+from app.services.quiz_lifecycle import finalize_expired_quiz
 
 
 router = APIRouter(
@@ -121,7 +122,13 @@ def submit_answer(
 
     # ========================================================
     # 4. CHECK QUIZ STATUS
+    #
+    # The backend — not the gateway — owns the deadline: a
+    # running quiz whose time limit expired is finished here
+    # so late answers are rejected even if the gateway died.
     # ========================================================
+
+    finalize_expired_quiz(db, quiz)
 
     if quiz.status != "running":
         raise HTTPException(
@@ -219,12 +226,28 @@ def submit_answer(
     )
 
     # ========================================================
-    # 10. SAVE RESPONSE (UPSERT - LAST ANSWER WINS)
+    # 10. SAVE RESPONSE (UPSERT — NEWEST SEQUENCE WINS)
     #
     # A student may press a key twice or change their mind.
     # Instead of inserting a duplicate row (which would
     # double-count in analytics), update the existing
     # response for this (quiz, question, student).
+    #
+    # The device stamps every answer attempt with a rising
+    # `sequence` counter. That makes the upsert safe against
+    # BLE reordering and retries:
+    #
+    #   sequence >  stored  -> newer attempt, overwrite
+    #   sequence == stored  -> duplicate delivery of the same
+    #                          attempt (ACK was lost) — return
+    #                          the stored answer unchanged
+    #   sequence <  stored  -> an OLD delayed packet; the
+    #                          stored answer is newer, ignore
+    #                          the packet (it must NOT roll
+    #                          the answer back)
+    #
+    # Answers without a sequence (older firmware) keep the
+    # plain last-write-wins behaviour.
     # ========================================================
 
     existing_response = (
@@ -238,6 +261,40 @@ def submit_answer(
     )
 
     if existing_response is not None:
+
+        stale_or_duplicate = (
+            data.sequence is not None
+            and existing_response.sequence is not None
+            and data.sequence <= existing_response.sequence
+        )
+
+        if stale_or_duplicate:
+
+            status = (
+                "DUPLICATE"
+                if data.sequence == existing_response.sequence
+                else "STALE_IGNORED"
+            )
+
+            response = existing_response
+
+            # Keep the device's score display in sync with
+            # what is actually stored.
+            device.status = "online"
+            device.last_seen = datetime.utcnow()
+            db.commit()
+            db.refresh(response)
+
+            return AnswerResponse(
+                success=True,
+                status=status,
+                quiz_id=response.quiz_id,
+                question_id=response.question_id,
+                student_id=response.student_id,
+                answer=response.answer,
+                correct=response.is_correct,
+                answered_at=response.answered_at,
+            )
 
         existing_response.answer = answer
         existing_response.is_correct = is_correct

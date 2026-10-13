@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PulseNet — Teacher</title>
-    <link rel="stylesheet" href="/style.css">
+    <link rel="stylesheet" href="/style.css?v=20261013">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><polygon fill='%232F6FED' points='13 2 3 14 12 14 11 22 21 10 12 10 13 2'/></svg>">
 </head>
 <body>
@@ -539,7 +539,7 @@
                 <div id="rtab-students" class="subpane hidden">
                     <div class="card">
                         <div class="card-head">
-                            <h3 data-i18n="res.perStudent">Student results</h3>
+                            <h3 data-i18n="results.perStudent">Student results</h3>
                             <span id="resultCount" class="chip">0</span>
                         </div>
                         <div class="table-wrap">
@@ -551,12 +551,13 @@
                                         <th class="ta-c" data-i18n="results.colAnswered">Answered</th>
                                         <th class="ta-c" data-i18n="results.colCorrect">✓</th>
                                         <th class="ta-c" data-i18n="results.colWrong">✗</th>
+                                        <th class="ta-c" data-i18n="results.colBlank">Blank</th>
                                         <th class="ta-c" data-i18n="results.colScore">Score</th>
                                         <th class="ta-c" data-i18n="results.colAcc">Accuracy</th>
                                     </tr>
                                 </thead>
                                 <tbody id="resultsBody">
-                                    <tr><td colspan="7" class="muted ta-c pad" data-i18n="results.empty">No data yet.</td></tr>
+                                    <tr><td colspan="8" class="muted ta-c pad" data-i18n="results.empty">No data yet.</td></tr>
                                 </tbody>
                             </table>
                         </div>
@@ -590,24 +591,24 @@
             </div>
             <div class="field">
                 <label class="field-label" for="modalText" data-i18n="modal.text">Question text</label>
-                <textarea id="modalText" class="input" rows="2"></textarea>
+                <textarea id="modalText" class="input" rows="3" maxlength="400"></textarea>
             </div>
             <div class="settings-grid">
                 <div class="field">
                     <label class="field-label" for="modalA">A</label>
-                    <input id="modalA" class="input" type="text">
+                    <input id="modalA" class="input" type="text" maxlength="160">
                 </div>
                 <div class="field">
                     <label class="field-label" for="modalB">B</label>
-                    <input id="modalB" class="input" type="text">
+                    <input id="modalB" class="input" type="text" maxlength="160">
                 </div>
                 <div class="field">
                     <label class="field-label" for="modalC">C</label>
-                    <input id="modalC" class="input" type="text">
+                    <input id="modalC" class="input" type="text" maxlength="160">
                 </div>
                 <div class="field">
                     <label class="field-label" for="modalD">D</label>
-                    <input id="modalD" class="input" type="text">
+                    <input id="modalD" class="input" type="text" maxlength="160">
                 </div>
             </div>
             <div class="field">
@@ -619,6 +620,11 @@
                     <option value="D">D</option>
                 </select>
             </div>
+            <div class="field">
+                <label class="field-label" data-i18n="modal.preview">Device preview</label>
+                <div id="modalPreview" class="device-preview"></div>
+                <div id="modalPreviewNote" class="muted small" style="margin-top:6px;"></div>
+            </div>
         </div>
         <div class="modal-foot">
             <button id="modalCancel" class="btn btn-ghost" data-i18n="modal.cancel">Cancel</button>
@@ -629,6 +635,6 @@
 
 <div id="toast" class="toast hidden"></div>
 
-<script src="/app.js"></script>
+<script src="/app.js?v=20261013"></script>
 </body>
 </html>
