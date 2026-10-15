@@ -27,18 +27,22 @@ const I18N = {
         "nav.dashboard": "Dashboard",
         "nav.bank": "Question Bank",
         "nav.import": "Import Questions",
-        "nav.sessions": "Quiz Sessions",
+        "nav.sessions": "Session Setup",
         "nav.live": "Live Quiz",
         "nav.devices": "Devices",
         "nav.results": "Quiz Results",
+        "nav.groupWorkflow": "Quiz workflow",
+        "nav.prepare": "Prepare",
+        "nav.conduct": "Conduct",
+        "nav.analyze": "Analyze",
         "page.dashboard.t": "Dashboard",
         "page.dashboard.s": "Class overview at a glance",
         "page.bank.t": "Question bank",
         "page.bank.s": "Create and review questions for the selected session",
         "page.import.t": "Import questions",
         "page.import.s": "Add questions from CSV or generate them with AI",
-        "page.sessions.t": "Quiz sessions",
-        "page.sessions.s": "Create sessions, configure and control them",
+        "page.sessions.t": "Session setup",
+        "page.sessions.s": "Create, configure and control quiz sessions",
         "page.live.t": "Live quiz",
         "page.live.s": "Lobby, quiz clock and live leaderboard",
         "page.devices.t": "Devices",
@@ -51,7 +55,8 @@ const I18N = {
         "quiz.create": "Create",
         "quiz.none": "— No quizzes —",
         "quiz.noneSelected": "No session selected.",
-        "quiz.pickHint": "Pick or create a session in “Quiz Sessions” first.",
+        "quiz.pickHint": "Pick or create a session in “Session Setup” first.",
+        "quiz.goSetup": "Open Session Setup",
         "status.draft": "Draft",
         "status.lobby": "Lobby",
         "status.running": "Live",
@@ -64,6 +69,24 @@ const I18N = {
         "dash.accuracy": "Answer accuracy",
         "dash.recent": "Recent quiz sessions",
         "dash.new": "+ New session",
+        "dash.continue": "Continue workflow",
+        "dash.quick": "Quick actions",
+        "dash.newQuiz": "Create new quiz",
+        "dash.goImport": "Import questions",
+        "dash.noActive": "No session in progress",
+        "dash.noActiveHint": "Create a quiz, prepare questions, run it live, then analyze the results.",
+        "dash.focusDraft": "Draft — add questions and configure the session.",
+        "dash.focusLobby": "Lobby open — students are registering on devices.",
+        "dash.focusRunning": "Live now — the class is answering.",
+        "dash.resume": "Resume",
+        "dash.actPrepare": "Prepare",
+        "dash.actResume": "Resume",
+        "dash.actResults": "Results",
+        "dash.gwOk": "Gateway ready",
+        "dash.gwWait": "Gateway waiting for device",
+        "dash.gwOff": "Gateway not running",
+        "dash.devOnlineShort": "{on}/{total} devices online",
+        "dash.checkDevices": "Check devices",
         "dash.colQuiz": "Quiz",
         "dash.colStatus": "Status",
         "dash.colStudents": "Students",
@@ -79,6 +102,8 @@ const I18N = {
         "bank.colQuestion": "Question",
         "bank.colAnswer": "Answer",
         "bank.noMatch": "No questions match the search.",
+        "bank.goImport": "Import questions",
+        "import.goBank": "Review in Question Bank",
         "import.title": "Import from CSV",
         "import.hint": "CSV columns: <code>Question, A, B, C, D, Correct Answer</code>. Drop the file below — it is previewed locally, then the whole file is validated on the server before anything is saved.",
         "import.drop": "Drag & drop the CSV here",
@@ -122,6 +147,9 @@ const I18N = {
         "setup.minutes": "{m} min",
         "setup.needQuestions": "Import at least 1 question first.",
         "setup.needTime": "Set the time limit first.",
+        "setup.qCount": "{n} questions ready",
+        "setup.qCountZero": "No questions yet — import before pushing.",
+        "setup.goImport": "Import questions",
         "setup.saved": "Settings saved. Pushing to devices…",
         "setup.pushed": "Session pushed! Devices are accepting student IDs.",
         "sess.newTitle": "New session",
@@ -132,9 +160,17 @@ const I18N = {
         "sess.saveSettings": "Save settings",
         "sess.saved": "Settings saved.",
         "sess.finishedHint": "This session has finished — open “Quiz Results” for the breakdown.",
-        "sess.selected": "Selected",
+        "sess.ctxSetup": "Setup",
+        "sess.viewResults": "View results",
+        "sess.colDelete": "Delete",
+        "sess.delTitle": "Delete this quiz",
+        "sess.delConfirm": "Delete quiz #{id} — {title}?\nQuestions, registrations and results will be removed permanently.",
+        "sess.deleted": "Quiz #{id} deleted.",
+        "sess.delRunning": "Finish the quiz before deleting it.",
+        "ctx.openLive": "Open live",
+        "ctx.openResults": "View results",
         "live.draftTitle": "Quiz not pushed yet",
-        "live.draftHint": "Configure the session in “Quiz Sessions”, then push it to the devices.",
+        "live.draftHint": "Configure the session in “Session Setup”, then push it to the devices.",
         "live.goSetup": "Open session setup",
         "live.lobbyTitle": "Lobby",
         "live.joinedHint": "students joined",
@@ -237,18 +273,22 @@ const I18N = {
         "nav.dashboard": "Bảng điều khiển",
         "nav.bank": "Ngân hàng câu hỏi",
         "nav.import": "Nhập câu hỏi",
-        "nav.sessions": "Buổi kiểm tra",
+        "nav.sessions": "Cài đặt buổi",
         "nav.live": "Quiz trực tiếp",
         "nav.devices": "Thiết bị",
         "nav.results": "Kết quả",
+        "nav.groupWorkflow": "Quy trình quiz",
+        "nav.prepare": "Soạn",
+        "nav.conduct": "Chạy",
+        "nav.analyze": "Phân tích",
         "page.dashboard.t": "Bảng điều khiển",
         "page.dashboard.s": "Tổng quan lớp học trong một màn hình",
         "page.bank.t": "Ngân hàng câu hỏi",
         "page.bank.s": "Soạn và xem lại câu hỏi của buổi đang chọn",
         "page.import.t": "Nhập câu hỏi",
         "page.import.s": "Thêm câu hỏi từ CSV hoặc sinh bằng AI",
-        "page.sessions.t": "Buổi kiểm tra",
-        "page.sessions.s": "Tạo buổi, cấu hình và điều khiển",
+        "page.sessions.t": "Cài đặt buổi",
+        "page.sessions.s": "Tạo, cấu hình và điều khiển buổi kiểm tra",
         "page.live.t": "Quiz trực tiếp",
         "page.live.s": "Sảnh chờ, đồng hồ và bảng xếp hạng trực tiếp",
         "page.devices.t": "Thiết bị",
@@ -261,7 +301,8 @@ const I18N = {
         "quiz.create": "Tạo quiz",
         "quiz.none": "— Chưa có quiz nào —",
         "quiz.noneSelected": "Chưa chọn buổi nào.",
-        "quiz.pickHint": "Chọn hoặc tạo một buổi trong “Buổi kiểm tra” trước.",
+        "quiz.pickHint": "Chọn hoặc tạo một buổi trong “Cài đặt buổi” trước.",
+        "quiz.goSetup": "Mở cài đặt buổi",
         "status.draft": "Nháp",
         "status.lobby": "Sảnh chờ",
         "status.running": "Đang chạy",
@@ -274,6 +315,24 @@ const I18N = {
         "dash.accuracy": "Độ chính xác",
         "dash.recent": "Buổi kiểm tra gần đây",
         "dash.new": "+ Tạo buổi mới",
+        "dash.continue": "Tiếp tục quy trình",
+        "dash.quick": "Thao tác nhanh",
+        "dash.newQuiz": "Tạo quiz mới",
+        "dash.goImport": "Nhập câu hỏi",
+        "dash.noActive": "Không có buổi đang diễn ra",
+        "dash.noActiveHint": "Tạo quiz, soạn câu hỏi, chạy trực tiếp rồi phân tích kết quả.",
+        "dash.focusDraft": "Nháp — thêm câu hỏi và cấu hình buổi.",
+        "dash.focusLobby": "Sảnh đang mở — sinh viên đang đăng ký trên thiết bị.",
+        "dash.focusRunning": "Đang chạy — lớp đang làm bài.",
+        "dash.resume": "Tiếp tục",
+        "dash.actPrepare": "Soạn",
+        "dash.actResume": "Vào live",
+        "dash.actResults": "Kết quả",
+        "dash.gwOk": "Gateway sẵn sàng",
+        "dash.gwWait": "Gateway đang chờ thiết bị",
+        "dash.gwOff": "Gateway chưa chạy",
+        "dash.devOnlineShort": "{on}/{total} thiết bị online",
+        "dash.checkDevices": "Xem thiết bị",
         "dash.colQuiz": "Quiz",
         "dash.colStatus": "Trạng thái",
         "dash.colStudents": "SV",
@@ -289,6 +348,8 @@ const I18N = {
         "bank.colQuestion": "Câu hỏi",
         "bank.colAnswer": "Đáp án",
         "bank.noMatch": "Không có câu hỏi nào khớp từ khóa.",
+        "bank.goImport": "Nhập câu hỏi",
+        "import.goBank": "Xem lại ở Ngân hàng câu hỏi",
         "import.title": "Nhập từ CSV",
         "import.hint": "Cột CSV: <code>Question, A, B, C, D, Correct Answer</code>. Thả file vào khung bên dưới — xem trước ngay tại máy, cả file được kiểm tra trên server trước khi lưu.",
         "import.drop": "Kéo & thả file CSV vào đây",
@@ -332,6 +393,9 @@ const I18N = {
         "setup.minutes": "{m} phút",
         "setup.needQuestions": "Hãy nhập ít nhất 1 câu hỏi trước.",
         "setup.needTime": "Hãy đặt thời gian làm bài trước.",
+        "setup.qCount": "{n} câu hỏi sẵn sàng",
+        "setup.qCountZero": "Chưa có câu hỏi — hãy nhập trước khi gửi.",
+        "setup.goImport": "Nhập câu hỏi",
         "setup.saved": "Đã lưu cài đặt. Đang gửi xuống thiết bị…",
         "setup.pushed": "Đã gửi phiên! Thiết bị đang nhận MSSV của sinh viên.",
         "sess.newTitle": "Buổi mới",
@@ -342,9 +406,17 @@ const I18N = {
         "sess.saveSettings": "Lưu cài đặt",
         "sess.saved": "Đã lưu cài đặt.",
         "sess.finishedHint": "Buổi này đã kết thúc — xem “Kết quả” để biết chi tiết.",
-        "sess.selected": "Đang chọn",
+        "sess.ctxSetup": "Cài đặt",
+        "sess.viewResults": "Xem kết quả",
+        "sess.colDelete": "Xóa",
+        "sess.delTitle": "Xóa quiz này",
+        "sess.delConfirm": "Xóa quiz #{id} — {title}?\nCâu hỏi, đăng ký và kết quả của buổi này sẽ bị xóa vĩnh viễn.",
+        "sess.deleted": "Đã xóa quiz #{id}.",
+        "sess.delRunning": "Hãy kết thúc quiz trước khi xóa.",
+        "ctx.openLive": "Mở live",
+        "ctx.openResults": "Xem kết quả",
         "live.draftTitle": "Quiz chưa gửi xuống thiết bị",
-        "live.draftHint": "Cấu hình buổi ở “Buổi kiểm tra”, sau đó gửi phiên xuống thiết bị.",
+        "live.draftHint": "Cấu hình buổi ở “Cài đặt buổi”, sau đó gửi phiên xuống thiết bị.",
         "live.goSetup": "Mở cài đặt buổi",
         "live.lobbyTitle": "Sảnh chờ",
         "live.joinedHint": "sinh viên đã vào",
@@ -626,6 +698,7 @@ async function selectQuiz(id) {
     }
 
     loadSettingsForm();
+    renderSessionBar();
     renderCurrentPage();
 }
 
@@ -651,6 +724,12 @@ async function createQuiz() {
         toast(t("live.created", { id: quiz.id, title: quiz.title }));
         state.quizId = quiz.id;
         await loadQuizzes(false);
+        // Creating a session selects it and leads into its setup.
+        await switchPage("sessions");
+        const card = $("#sessionSetup");
+        if (card && !card.classList.contains("hidden")) {
+            card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
     } catch (err) {
         toast(errMsg(err), true);
     }
@@ -690,10 +769,143 @@ async function switchPage(page) {
     if (page === "devices") await loadDevices();
     if (page === "results") await loadResultsAll();
 
+    renderSessionBar();
     restartPolling();
 }
 
+/* ---------------- Session context bar ---------------- */
+
+const SESSION_PAGES = ["bank", "import", "sessions", "live", "results"];
+
+let sessionBarKey = "";
+
+/** Keep the selected session visible across session-specific pages:
+ *  title, status, a setup link, and a status-aware next action. */
+function renderSessionBar() {
+    const bar = $("#sessionBar");
+    if (!bar) return;
+
+    if (!SESSION_PAGES.includes(state.page) || !state.quiz) {
+        sessionBarKey = "";
+        bar.classList.add("hidden");
+        return;
+    }
+
+    // Skip redundant re-renders (the live page polls every 2s).
+    const key = `${state.page}|${state.quiz.id}|${state.quiz.status}|${lang}`;
+    if (key === sessionBarKey && !bar.classList.contains("hidden")) return;
+    sessionBarKey = key;
+
+    const q = state.quiz;
+    const st = q.status;
+
+    let cta = "";
+    if (st === "lobby" || st === "running") {
+        cta = `<button class="btn btn-primary btn-sm" data-sb="live">${esc(t("ctx.openLive"))}</button>`;
+    } else if (st === "finished") {
+        cta = `<button class="btn btn-primary btn-sm" data-sb="results">${esc(t("ctx.openResults"))}</button>`;
+    }
+
+    bar.innerHTML = `
+        <div class="sb-left">
+            <span class="sb-title">#${q.id} — ${esc(q.title)}</span>
+            ${badgeHtml(st)}
+        </div>
+        <div class="sb-actions">
+            <button class="btn btn-ghost btn-sm" data-sb="setup">${esc(t("sess.ctxSetup"))}</button>
+            ${cta}
+        </div>`;
+
+    bar.classList.remove("hidden");
+
+    bar.querySelectorAll("[data-sb]").forEach((btn) =>
+        btn.addEventListener("click", () => {
+            const act = btn.dataset.sb;
+            if (act === "setup") switchPage("sessions");
+            else if (act === "live") switchPage("live");
+            else if (act === "results") switchPage("results");
+        })
+    );
+}
+
 /* ---------------- Page: DASHBOARD ---------------- */
+
+let lastDashStats = null;
+
+/** Gateway + device readiness chip for the dashboard hero. */
+function renderDashGateway() {
+    const el = $("#dashGwStrip");
+    if (!el || state.page !== "dashboard") return;
+
+    let dotCls, txt;
+    if (gwState && gwState.online && gwState.connected) {
+        dotCls = "dot-green"; txt = t("dash.gwOk");
+    } else if (gwState && gwState.online) {
+        dotCls = "dot-amber"; txt = t("dash.gwWait");
+    } else {
+        dotCls = "dot-red"; txt = t("dash.gwOff");
+    }
+
+    const dev = lastDashStats
+        ? ` · ${esc(t("dash.devOnlineShort", {
+            on: lastDashStats.devices_online,
+            total: lastDashStats.devices_total,
+        }))}`
+        : "";
+
+    el.innerHTML =
+        `<span class="dot ${dotCls}"></span><span>${esc(txt)}${dev}</span>` +
+        `<button class="btn btn-ghost btn-sm dash-check-dev">${esc(t("dash.checkDevices"))}</button>`;
+
+    const b = el.querySelector(".dash-check-dev");
+    if (b) b.onclick = () => switchPage("devices");
+}
+
+/** Hero card: the most relevant unfinished session + how to resume it. */
+function renderContinueCard(recent) {
+    const box = $("#continueBody");
+
+    const focus = recent.find((s) => s.status === "running")
+        || recent.find((s) => s.status === "lobby")
+        || recent.find((s) => s.status === "draft");
+
+    let html = "";
+
+    if (focus) {
+        const hints = {
+            draft: "dash.focusDraft",
+            lobby: "dash.focusLobby",
+            running: "dash.focusRunning",
+        };
+
+        html = `
+            <div class="cont-head">
+                <span class="cont-title">#${focus.id} — ${esc(focus.title)}</span>
+                ${badgeHtml(focus.status)}
+            </div>
+            <p class="cont-hint">${esc(t(hints[focus.status]))}</p>
+            <div class="cont-actions">
+                <button class="btn btn-primary btn-sm dash-focus-go" data-id="${focus.id}" data-status="${focus.status}">${esc(t("dash.resume"))}</button>
+            </div>`;
+    } else {
+        html = `
+            <div class="cont-head">
+                <span class="cont-title">${esc(t("dash.noActive"))}</span>
+            </div>
+            <p class="cont-hint">${esc(t("dash.noActiveHint"))}</p>`;
+    }
+
+    html += `<div class="gw-strip" id="dashGwStrip"></div>`;
+
+    box.innerHTML = html;
+
+    const go = box.querySelector(".dash-focus-go");
+    if (go) {
+        go.onclick = () => openQuiz(Number(go.dataset.id), go.dataset.status);
+    }
+
+    renderDashGateway();
+}
 
 async function loadDashboard() {
     let data;
@@ -703,6 +915,10 @@ async function loadDashboard() {
         toast(errMsg(err), true);
         return;
     }
+
+    lastDashStats = data;
+
+    renderContinueCard(data.recent_sessions);
 
     $("#dashCards").innerHTML = `
         <div class="stat-card">
@@ -730,6 +946,13 @@ async function loadDashboard() {
             <div class="stat-label">${esc(t("dash.accuracy"))}</div>
         </div>`;
 
+    const ACT_KEY = {
+        draft: "dash.actPrepare",
+        lobby: "dash.actResume",
+        running: "dash.actResume",
+        finished: "dash.actResults",
+    };
+
     $("#dashSessionsBody").innerHTML =
         data.recent_sessions.length === 0
             ? `<tr><td colspan='6' class='muted ta-c pad'>${esc(t("quiz.none"))}</td></tr>`
@@ -741,7 +964,7 @@ async function loadDashboard() {
                         <td class="ta-c">${s.student_count}</td>
                         <td>${esc(fmtDateTime(s.started_at))}</td>
                         <td>${esc(fmtDateTime(s.finished_at))}</td>
-                        <td class="ta-c"><button class="btn btn-ghost btn-sm dash-open" data-id="${s.id}" data-status="${s.status}">${esc(t("dash.open"))}</button></td>
+                        <td class="ta-c"><button class="btn btn-ghost btn-sm dash-open" data-id="${s.id}" data-status="${s.status}">${esc(t(ACT_KEY[s.status] || "dash.open"))}</button></td>
                     </tr>`)
                 .join("");
 
@@ -816,7 +1039,11 @@ function renderBankRows() {
 
     $("#bankBody").innerHTML =
         questions.length === 0
-            ? `<tr><td colspan='7' class='muted ta-c pad'>${esc(search ? t("bank.noMatch") : t("setup.noQuestions"))}</td></tr>`
+            ? `<tr><td colspan='7' class='muted ta-c pad'>${
+                  search
+                      ? esc(t("bank.noMatch"))
+                      : `${esc(t("setup.noQuestions"))} <button class="row-link bank-go-import">${esc(t("bank.goImport"))}</button>`
+              }</td></tr>`
             : questions
                 .map((item) => `
                     <tr>
@@ -829,6 +1056,9 @@ function renderBankRows() {
                         <td class="ta-c"><span class="chip chip-correct">${item.correct_answer}</span></td>
                     </tr>`)
                 .join("");
+
+    const goImport = $("#bankBody .bank-go-import");
+    if (goImport) goImport.onclick = () => switchPage("import");
 }
 
 function openQuestionModal() {
@@ -1115,6 +1345,7 @@ function renderImportResult(result, ok) {
 
     if (ok) {
         html += `<div class="import-box import-ok"><b>✔</b> ${esc(t("setup.importOk", { imported: result.imported, duplicates: result.duplicates }))}</div>`;
+        html += `<div class="next-step"><button class="btn btn-ghost btn-sm next-bank">${esc(t("import.goBank"))}</button></div>`;
     } else {
         html += `<div class="import-box import-bad"><b>✖</b> ${esc(t("setup.importBad"))}</div>`;
     }
@@ -1262,7 +1493,9 @@ async function generateAi() {
         }
 
         box.classList.remove("hidden");
-        box.innerHTML = `<div class="import-box import-ok"><b>✔</b> ${esc(t("setup.aiOk", { n: result.generated, file: result.filename }))}</div>`;
+        box.innerHTML =
+            `<div class="import-box import-ok"><b>✔</b> ${esc(t("setup.aiOk", { n: result.generated, file: result.filename }))}</div>` +
+            `<div class="next-step"><button class="btn btn-ghost btn-sm next-bank">${esc(t("import.goBank"))}</button></div>`;
 
         toast(t("setup.aiOk", { n: result.generated, file: result.filename }));
 
@@ -1304,7 +1537,11 @@ async function loadSessions() {
                         <td class="ta-c">${q.expected_students || "—"}</td>
                         <td>${esc(fmtDateTime(q.started_at))}</td>
                         <td>${esc(fmtDateTime(q.finished_at))}</td>
-                        <td class="ta-c">${q.id === state.quizId ? `<span class="chip chip-correct">${esc(t("sess.selected"))}</span>` : ""}</td>
+                        <td class="ta-c">${
+                            q.status === "running"
+                                ? `<span class="muted" title="${esc(t("sess.delRunning"))}">—</span>`
+                                : `<button class="del-quiz" data-id="${q.id}" data-title="${esc(q.title)}" title="${esc(t("sess.delTitle"))}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>`
+                        }</td>
                     </tr>`)
                 .join("");
 
@@ -1312,7 +1549,30 @@ async function loadSessions() {
         btn.addEventListener("click", () => selectQuiz(Number(btn.dataset.id)))
     );
 
+    document.querySelectorAll("#sessionsBody .del-quiz").forEach((btn) =>
+        btn.addEventListener("click", () =>
+            deleteQuiz(Number(btn.dataset.id), btn.dataset.title)
+        )
+    );
+
     renderSetupCard();
+    updateSetupQCount();
+}
+
+/** Permanently remove a quiz session (backend also wipes its
+ *  questions, registrations and responses). */
+async function deleteQuiz(id, title) {
+    if (!confirm(t("sess.delConfirm", { id, title }))) return;
+
+    try {
+        await api(`/api/quizzes/${id}`, { method: "DELETE" });
+        toast(t("sess.deleted", { id }));
+        // If the deleted quiz was selected, loadQuizzes falls
+        // back to the first remaining one and re-renders.
+        await loadQuizzes();
+    } catch (err) {
+        toast(errMsg(err), true);
+    }
 }
 
 function loadSettingsForm() {
@@ -1347,6 +1607,40 @@ function renderSetupCard() {
     $("#startHereBtn").classList.toggle("hidden", st !== "lobby");
     $("#cancelLobbyBtn").classList.toggle("hidden", st !== "lobby");
     $("#finishHereBtn").classList.toggle("hidden", st !== "running");
+    $("#viewResultsBtn").classList.toggle("hidden", st !== "finished");
+}
+
+/** Question readiness line in the setup card — warns and links
+ *  to Import when the session has no questions yet. */
+let setupQCountBusy = false;
+
+async function updateSetupQCount() {
+    if (state.quizId == null || setupQCountBusy) return;
+    setupQCountBusy = true;
+
+    try {
+        let questions;
+        try {
+            questions = await api(`/api/quizzes/${state.quizId}/questions`);
+        } catch { return; }
+
+        const el = $("#setupQCount");
+        if (!el) return;
+
+        if (questions.length === 0) {
+            el.innerHTML =
+                `<span class="chip chip-warn">0</span> ${esc(t("setup.qCountZero"))} ` +
+                `<button class="row-link setup-go-import">${esc(t("setup.goImport"))}</button>`;
+            const b = el.querySelector(".setup-go-import");
+            if (b) b.onclick = () => switchPage("import");
+        } else {
+            el.innerHTML =
+                `<span class="chip chip-ok">${questions.length}</span> ` +
+                esc(t("setup.qCount", { n: questions.length }));
+        }
+    } finally {
+        setupQCountBusy = false;
+    }
 }
 
 async function saveSettings() {
@@ -1500,7 +1794,10 @@ async function refreshLiveInner() {
     $("#liveFinished").classList.toggle("hidden", st !== "finished");
     $("#liveQuestionCard").classList.toggle("hidden", st === "finished");
 
-    if (st === "draft") return;
+    if (st === "draft") {
+        renderDraftReadiness();
+        return;
+    }
 
     let students = null;
     try {
@@ -1690,6 +1987,37 @@ function renderLiveQuestion(qStats, totalStudents) {
 function gwConnectedAddresses(gw) {
     const devices = (gw && gw.devices) || [];
     return devices.filter((d) => d.connected).map((d) => d.address);
+}
+
+/** Gateway readiness strip on the Live page's draft card —
+ *  the last check before pushing the session to devices. */
+function renderDraftReadiness() {
+    const el = $("#draftReadiness");
+    if (!el) return;
+
+    const st = state.quiz ? state.quiz.status : "draft";
+    if (st !== "draft") {
+        el.classList.add("hidden");
+        return;
+    }
+
+    el.classList.remove("hidden");
+
+    let dotCls, txt;
+    if (gwState && gwState.online && gwState.connected) {
+        dotCls = "dot-green"; txt = t("dash.gwOk");
+    } else if (gwState && gwState.online) {
+        dotCls = "dot-amber"; txt = t("dash.gwWait");
+    } else {
+        dotCls = "dot-red"; txt = t("dash.gwOff");
+    }
+
+    el.innerHTML =
+        `<span class="dot ${dotCls}"></span><span>${esc(txt)}</span>` +
+        `<button class="btn btn-ghost btn-sm draft-check-dev">${esc(t("dash.checkDevices"))}</button>`;
+
+    const b = el.querySelector(".draft-check-dev");
+    if (b) b.onclick = () => switchPage("devices");
 }
 
 function renderLiveGateway() {
@@ -1998,8 +2326,12 @@ async function refreshGateway() {
     gwState = gw;
     renderGateway();
 
-    if (state.page === "live") renderLiveGateway();
+    if (state.page === "live") {
+        renderLiveGateway();
+        if (state.quiz && state.quiz.status === "draft") renderDraftReadiness();
+    }
     if (state.page === "devices") renderDevicesGateway();
+    if (state.page === "dashboard") renderDashGateway();
 }
 
 function renderGateway() {
@@ -2046,7 +2378,11 @@ function restartPolling() {
             if (state.quizId == null) return;
             try {
                 state.quiz = await api(`/api/quizzes/${state.quizId}`);
-                if (state.page === "sessions") renderSetupCard();
+                if (state.page === "sessions") {
+                    renderSetupCard();
+                    updateSetupQCount();
+                }
+                renderSessionBar();
             } catch { /* transient */ }
         }, 5000);
     }
@@ -2079,6 +2415,20 @@ function bindEvents() {
     $("#dashNewBtn").addEventListener("click", async () => {
         await switchPage("sessions");
         $("#newQuizTitle").focus();
+    });
+    $("#dashImportBtn").addEventListener("click", () => switchPage("import"));
+
+    // Empty-state cards: "no session selected" -> Session Setup
+    document.querySelectorAll(".go-setup").forEach((btn) =>
+        btn.addEventListener("click", () => switchPage("sessions"))
+    );
+
+    // Import / AI success -> review in Question Bank (delegated:
+    // the result boxes are re-rendered by JS)
+    ["#importResult", "#aiResult"].forEach((sel) => {
+        $(sel).addEventListener("click", (e) => {
+            if (e.target.closest(".next-bank")) switchPage("bank");
+        });
     });
 
     // Question bank
@@ -2158,6 +2508,7 @@ function bindEvents() {
     $("#startHereBtn").addEventListener("click", startQuiz);
     $("#cancelLobbyBtn").addEventListener("click", cancelLobby);
     $("#finishHereBtn").addEventListener("click", finishQuiz);
+    $("#viewResultsBtn").addEventListener("click", () => switchPage("results"));
 
     // Live
     $("#startBtn").addEventListener("click", startQuiz);

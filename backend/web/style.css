@@ -151,6 +151,62 @@ code {
 
 .side-nav .tab.active svg { opacity: 1; }
 
+/* Grouped workflow navigation */
+
+.nav-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 10px;
+}
+
+.nav-group-label {
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #7C89AF;
+    padding: 2px 12px;
+}
+
+.nav-sub-label {
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #8B96B8;
+    padding: 8px 12px 2px;
+}
+
+.side-nav .tab.tab-sub {
+    padding: 8px 12px;
+    font-size: 13px;
+}
+
+.step {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.14);
+    color: #C7D0E8;
+    font-size: 10.5px;
+    font-weight: 800;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.side-nav .tab:hover .step {
+    background: rgba(255, 255, 255, 0.22);
+    color: #fff;
+}
+
+.side-nav .tab.active .step {
+    background: var(--blue);
+    color: #fff;
+}
+
 .side-foot {
     margin-top: auto;
     display: flex;
@@ -235,6 +291,116 @@ code {
 }
 
 .lang-btn:hover { border-color: var(--blue); color: var(--blue); }
+
+/* ---------------- Session context bar ---------------- */
+
+.session-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 8px 12px;
+    margin-bottom: 14px;
+    box-shadow: var(--shadow);
+    flex-wrap: wrap;
+}
+
+.sb-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    flex-wrap: wrap;
+}
+
+.sb-title {
+    font-weight: 700;
+    font-size: 13.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 460px;
+}
+
+.sb-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+/* ---------------- Dashboard hero ---------------- */
+
+.dash-hero {
+    display: grid;
+    grid-template-columns: 1fr 280px;
+    gap: 14px;
+    margin-bottom: 14px;
+    align-items: stretch;
+}
+
+.cont-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 4px;
+}
+
+.cont-title {
+    font-size: 15.5px;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+}
+
+.cont-hint {
+    color: var(--muted);
+    font-size: 13px;
+    margin: 2px 0 0;
+}
+
+.cont-actions { margin-top: 12px; }
+
+.gw-strip {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin-top: 14px;
+    padding-top: 11px;
+    border-top: 1px dashed var(--border);
+    font-size: 12.5px;
+    color: var(--muted);
+    flex-wrap: wrap;
+}
+
+.gw-strip .dot { width: 8px; height: 8px; }
+
+.quick-card .btn {
+    width: 100%;
+}
+
+.quick-card .btn + .btn { margin-top: 8px; }
+
+/* ---------------- Readiness strip (live draft) ---------------- */
+
+.readiness-strip {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    margin: 12px 0 2px;
+    flex-wrap: wrap;
+    font-size: 12.5px;
+    color: var(--muted);
+}
+
+/* ---------------- Next-step link ---------------- */
+
+.next-step { margin-top: 10px; }
+
+.setup-qcount { margin: 0 0 10px; }
 
 /* ---------------- Status dots ---------------- */
 
@@ -503,6 +669,25 @@ code {
 }
 
 .row-link:hover { text-decoration: underline; }
+
+/* Delete-quiz icon button (All sessions table) */
+.del-quiz {
+    border: none;
+    background: none;
+    cursor: pointer;
+    color: #B6BECD;
+    padding: 6px;
+    border-radius: 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: color 0.15s, background 0.15s;
+}
+
+.del-quiz:hover {
+    color: var(--red);
+    background: var(--red-soft);
+}
 
 /* ---------------- Toolbar ---------------- */
 
@@ -1193,9 +1378,24 @@ code {
         flex-direction: row;
         overflow-x: auto;
         padding-bottom: 4px;
+        gap: 6px;
     }
 
     .side-nav .tab { width: auto; white-space: nowrap; }
+
+    .nav-group-label, .nav-sub-label { display: none; }
+
+    .nav-group {
+        flex-direction: row;
+        margin-top: 0;
+        gap: 6px;
+        padding-left: 10px;
+        border-left: 1px solid rgba(255, 255, 255, 0.12);
+    }
+
+    .dash-hero { grid-template-columns: 1fr; }
+
+    .sb-title { max-width: 220px; }
 
     .side-foot { display: none; }
 

@@ -583,6 +583,94 @@ def main():
     )
 
     # ========================================================
+    # DELETE QUIZ (2026-10-14)
+    #
+    # Sessions page column: permanently remove a quiz plus
+    # its questions, registrations and responses. A running
+    # quiz must be finished first.
+    # ========================================================
+
+    print("\n=== Delete quiz ===")
+
+    from app.api.quizzes import delete_quiz
+    from app.models.question import Question as QuestionModel
+    from app.models.quiz_registration import QuizRegistration
+    from app.models.response import Response as ResponseModel
+
+    del_quiz = create_quiz(QuizCreateRequest(title="E2E Delete Me"), db)
+    del_id = del_quiz.id
+
+    create_question(
+        del_id,
+        QuestionCreateRequest(
+            question_number=1,
+            question_text="Deleted?",
+            option_a="a",
+            option_b="b",
+            option_c="c",
+            option_d="d",
+            correct_answer="A",
+        ),
+        db,
+    )
+
+    setup_quiz(
+        del_id,
+        QuizSetupRequest(time_limit_sec=60, expected_students=1),
+        db,
+    )
+    open_lobby(del_id, db)
+
+    reg = register_device(
+        DeviceRegisterRequest(
+            student_id="2151999",
+            device_mac="AA:AA:AA:AA:AA:99",
+            device_code="PULSENET-0099",
+            quiz_id=del_id,
+        ),
+        db,
+    )
+    check("delete: student registered in target quiz", reg.success is True)
+
+    start_quiz(del_id, db)
+
+    submit_answer(
+        answer_payload("2151999", "AA:AA:AA:AA:AA:99", del_id, 1, "A", 1),
+        db,
+    )
+
+    expect_rejected(
+        "delete: running quiz rejected",
+        delete_quiz, del_id, db,
+    )
+
+    finish_quiz(del_id, db)
+
+    result = delete_quiz(del_id, db)
+    check(
+        "delete: returns deleted payload",
+        result["deleted"] is True and result["quiz_id"] == del_id,
+    )
+    expect_rejected("delete: quiz gone from GET", get_quiz, del_id, db)
+
+    check(
+        "delete: questions wiped",
+        db.query(QuestionModel).filter_by(quiz_id=del_id).count() == 0,
+    )
+    check(
+        "delete: registrations wiped",
+        db.query(QuizRegistration).filter_by(quiz_id=del_id).count() == 0,
+    )
+    check(
+        "delete: responses wiped",
+        db.query(ResponseModel).filter_by(quiz_id=del_id).count() == 0,
+    )
+    check(
+        "delete: other quizzes untouched",
+        any(q.id == quiz_id for q in get_quizzes(db)),
+    )
+
+    # ========================================================
     # SUMMARY
     # ========================================================
 

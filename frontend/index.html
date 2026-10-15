@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PulseNet — Teacher</title>
-    <link rel="stylesheet" href="/style.css?v=20261013">
+    <link rel="stylesheet" href="/style.css?v=20261014b">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><polygon fill='%232F6FED' points='13 2 3 14 12 14 11 22 21 10 12 10 13 2'/></svg>">
 </head>
 <body>
@@ -29,30 +29,43 @@
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/></svg>
                 <span data-i18n="nav.dashboard">Dashboard</span>
             </button>
-            <button class="tab" data-page="bank">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
-                <span data-i18n="nav.bank">Question Bank</span>
-            </button>
-            <button class="tab" data-page="import">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-                <span data-i18n="nav.import">Import Questions</span>
-            </button>
-            <button class="tab" data-page="sessions">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-                <span data-i18n="nav.sessions">Quiz Sessions</span>
-            </button>
-            <button class="tab" data-page="live">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-                <span data-i18n="nav.live">Live Quiz</span>
-            </button>
-            <button class="tab" data-page="devices">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-                <span data-i18n="nav.devices">Devices</span>
-            </button>
-            <button class="tab" data-page="results">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
-                <span data-i18n="nav.results">Quiz Results</span>
-            </button>
+
+            <div class="nav-group">
+                <div class="nav-group-label" data-i18n="nav.groupWorkflow">Quiz workflow</div>
+
+                <div class="nav-sub-label" data-i18n="nav.prepare">Prepare</div>
+                <button class="tab tab-sub" data-page="sessions">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                    <span class="step">1</span>
+                    <span data-i18n="nav.sessions">Session Setup</span>
+                </button>
+                <button class="tab tab-sub" data-page="import">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                    <span class="step">2</span>
+                    <span data-i18n="nav.import">Import Questions</span>
+                </button>
+                <button class="tab tab-sub" data-page="bank">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+                    <span class="step">3</span>
+                    <span data-i18n="nav.bank">Question Bank</span>
+                </button>
+
+                <div class="nav-sub-label" data-i18n="nav.conduct">Conduct</div>
+                <button class="tab tab-sub" data-page="devices">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                    <span data-i18n="nav.devices">Devices</span>
+                </button>
+                <button class="tab tab-sub" data-page="live">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                    <span data-i18n="nav.live">Live Quiz</span>
+                </button>
+
+                <div class="nav-sub-label" data-i18n="nav.analyze">Analyze</div>
+                <button class="tab tab-sub" data-page="results">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+                    <span data-i18n="nav.results">Quiz Results</span>
+                </button>
+            </div>
         </nav>
 
         <div class="side-foot">
@@ -95,15 +108,33 @@
             </div>
         </header>
 
+        <!-- Session context bar — visible on session-specific pages -->
+        <div id="sessionBar" class="session-bar hidden"></div>
+
         <!-- ============ PAGE: DASHBOARD ============ -->
 
         <section id="page-dashboard" class="page">
+            <div class="dash-hero">
+                <div class="card continue-card">
+                    <div class="card-head">
+                        <h3 data-i18n="dash.continue">Continue workflow</h3>
+                    </div>
+                    <div id="continueBody"><p class="muted pad">…</p></div>
+                </div>
+                <div class="card quick-card">
+                    <div class="card-head">
+                        <h3 data-i18n="dash.quick">Quick actions</h3>
+                    </div>
+                    <button id="dashNewBtn" class="btn btn-primary" data-i18n="dash.newQuiz">Create new quiz</button>
+                    <button id="dashImportBtn" class="btn btn-ghost" data-i18n="dash.goImport">Import questions</button>
+                </div>
+            </div>
+
             <div class="stat-grid" id="dashCards"></div>
 
             <div class="card">
                 <div class="card-head">
                     <h3 data-i18n="dash.recent">Recent quiz sessions</h3>
-                    <button id="dashNewBtn" class="btn btn-primary btn-sm" data-i18n="dash.new">+ New session</button>
                 </div>
                 <div class="table-wrap">
                     <table class="table">
@@ -134,6 +165,7 @@
                 </div>
                 <h3 data-i18n="quiz.noneSelected">No session selected.</h3>
                 <p class="muted" data-i18n="quiz.pickHint">Pick or create a session in “Quiz Sessions” first.</p>
+                <button class="btn btn-primary go-setup" data-i18n="quiz.goSetup">Open Session Setup</button>
             </div>
 
             <div id="bankPanel" class="card hidden">
@@ -175,6 +207,7 @@
                 </div>
                 <h3 data-i18n="quiz.noneSelected">No session selected.</h3>
                 <p class="muted" data-i18n="quiz.pickHint">Pick or create a session in “Quiz Sessions” first.</p>
+                <button class="btn btn-primary go-setup" data-i18n="quiz.goSetup">Open Session Setup</button>
             </div>
 
             <div id="importPanel" class="hidden">
@@ -283,7 +316,7 @@
                                 <th class="ta-c" data-i18n="sess.colExpected">Expected</th>
                                 <th data-i18n="dash.colStarted">Started</th>
                                 <th data-i18n="dash.colFinished">Finished</th>
-                                <th class="ta-c" data-i18n="dash.colAction">Action</th>
+                                <th class="ta-c" data-i18n="sess.colDelete">Delete</th>
                             </tr>
                         </thead>
                         <tbody id="sessionsBody">
@@ -318,12 +351,15 @@
                     </div>
                 </div>
 
+                <p id="setupQCount" class="muted small setup-qcount"></p>
+
                 <div class="lobby-actions">
                     <button id="saveSettingsBtn" class="btn btn-ghost btn-big" data-i18n="sess.saveSettings">Save settings</button>
                     <button id="pushBtn" class="btn btn-primary btn-big" data-i18n="setup.pushBtn">Push to devices</button>
                     <button id="startHereBtn" class="btn btn-green btn-big hidden" data-i18n="live.startBtn">Start quiz</button>
                     <button id="cancelLobbyBtn" class="btn btn-ghost btn-big hidden" data-i18n="live.cancelBtn">Cancel</button>
                     <button id="finishHereBtn" class="btn btn-red btn-big hidden" data-i18n="live.finishBtn">Finish</button>
+                    <button id="viewResultsBtn" class="btn btn-primary btn-big hidden" data-i18n="sess.viewResults">View results</button>
                 </div>
                 <p class="muted small" data-i18n="setup.pushHint">Devices will show the quiz name and wait for students to enter their IDs.</p>
             </div>
@@ -339,6 +375,7 @@
                 </div>
                 <h3 data-i18n="quiz.noneSelected">No session selected.</h3>
                 <p class="muted" data-i18n="quiz.pickHint">Pick or create a session in “Quiz Sessions” first.</p>
+                <button class="btn btn-primary go-setup" data-i18n="quiz.goSetup">Open Session Setup</button>
             </div>
 
             <div id="livePanel" class="hidden">
@@ -350,6 +387,7 @@
                     </div>
                     <h3 data-i18n="live.draftTitle">Quiz not pushed yet</h3>
                     <p class="muted" data-i18n="live.draftHint">Configure the session in “Quiz Sessions”, then push it to the devices.</p>
+                    <div id="draftReadiness" class="readiness-strip hidden"></div>
                     <button id="goSetupBtn" class="btn btn-primary" data-i18n="live.goSetup">Open session setup</button>
                 </div>
 
@@ -514,6 +552,7 @@
                 </div>
                 <h3 data-i18n="quiz.noneSelected">No session selected.</h3>
                 <p class="muted" data-i18n="quiz.pickHint">Pick or create a session in “Quiz Sessions” first.</p>
+                <button class="btn btn-primary go-setup" data-i18n="quiz.goSetup">Open Session Setup</button>
             </div>
 
             <div id="resultsPanel" class="hidden">
@@ -635,6 +674,6 @@
 
 <div id="toast" class="toast hidden"></div>
 
-<script src="/app.js?v=20261013"></script>
+<script src="/app.js?v=20261014b"></script>
 </body>
 </html>

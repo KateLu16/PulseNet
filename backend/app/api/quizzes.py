@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.quiz import Quiz
 from app.models.question import Question
+from app.models.quiz_registration import QuizRegistration
+from app.models.response import Response
 from app.schemas.quiz import (
     QuizCreateRequest,
     QuizResponse,
@@ -97,6 +99,57 @@ def get_quiz(
     finalize_expired_quiz(db, quiz)
 
     return quiz
+
+
+# ============================================================
+# DELETE QUIZ
+# Permanently removes a session together with its questions,
+# registrations and responses. SQLite runs without enforced
+# foreign keys (database.py enables no PRAGMA), so children
+# are deleted explicitly, responses first (they also point
+# at questions). Students/devices are shared across quizzes
+# and are kept. A running quiz must be finished first.
+# ============================================================
+
+@router.delete(
+    "/{quiz_id}",
+)
+def delete_quiz(
+    quiz_id: int,
+    db: Session = Depends(get_db),
+):
+    quiz = (
+        db.query(Quiz)
+        .filter(Quiz.id == quiz_id)
+        .first()
+    )
+
+    if quiz is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Quiz not found",
+        )
+
+    if quiz.status == "running":
+        raise HTTPException(
+            status_code=400,
+            detail="Quiz is running — finish it before deleting",
+        )
+
+    title = quiz.title
+
+    db.query(Response).filter(Response.quiz_id == quiz_id).delete()
+    db.query(QuizRegistration).filter(QuizRegistration.quiz_id == quiz_id).delete()
+    db.query(Question).filter(Question.quiz_id == quiz_id).delete()
+    db.query(Quiz).filter(Quiz.id == quiz_id).delete()
+
+    db.commit()
+
+    return {
+        "deleted": True,
+        "quiz_id": quiz_id,
+        "title": title,
+    }
 
 
 # ============================================================
