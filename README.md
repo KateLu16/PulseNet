@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/img/hcmute.png" alt="HCMUTE" height="72"/>
+<img src="docs/img/hcmute.png" alt="HCMUTE" height="100"/>
 
 # PulseNet
 
