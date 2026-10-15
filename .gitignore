@@ -30,29 +30,25 @@ uvicorn.log
 *.elf
 *.map
 
-# ===== KiCad =====
-*.bak
-*.bak-*
-fp-info-cache
-*-backups/
-*.kicad_prl-backup
-# Autorouter artifacts
-*.ses
-*.dsn
-drc*.json
-temp-freerouting.dsn
+# ===== KiCad (local experiment, superseded by the Proteus design) =====
+/Device/
 
 # ===== Proteus =====
-*.pdsprj
-*.pdsprj.*.workspace
+# Working/autorouter artifacts are ignored, but the published project
+# file and its PDF export are tracked (see negations below).
+*.pdsprj.*
 *.EDF
 *.DO
 *.sts
 *.rte
+*.log
 Project Backups/
+!/PCB.pdsprj
 
 # ===== CAD =====
 ~WRL*.tmp
+# Local duplicate of 3D_DESIGN/ (same SolidWorks parts, tracked there)
+/PulseNet_3D/
 
 # ===== Office / temp / lock files =====
 ~$*

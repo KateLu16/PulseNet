@@ -11,7 +11,7 @@ ESP32 clickers · BLE · Raspberry Pi gateway · FastAPI dashboard with live ana
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![PlatformIO](https://img.shields.io/badge/framework-PlatformIO-orange.svg)](https://platformio.org/)
 [![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688.svg)](https://fastapi.tiangolo.com/)
-[![KiCad](https://img.shields.io/badge/PCB-KiCad-314cb0.svg)](https://www.kicad.org/)
+[![Proteus](https://img.shields.io/badge/EDA-Proteus-2E5E4E.svg)](https://www.labcenter.com/)
 
 *An end-to-end IoT course project — Ho Chi Minh City University of Technology and Education (HCMUTE)*
 
@@ -56,8 +56,8 @@ backend, dashboard and analytics — was designed and built from scratch.
 - **Self-paced & presenter-led modes** — students may answer questions in any
   order (self-paced) or follow the teacher's current question; the backend
   owns quiz deadlines even if the gateway goes offline.
-- **Custom hardware** — 2-layer KiCad PCB (ESP32-WROOM-32, ST7735 TFT, 4×4
-  keypad, RGB status LED, CR2032 coin cell) in a 3D-printed enclosure.
+- **Custom hardware** — 2-layer PCB designed in Proteus (ESP32-WROOM-32,
+  ST7735 TFT, 4×4 keypad, power terminal block) in a 3D-printed enclosure.
 
 ## Screenshots
 
@@ -101,10 +101,11 @@ monotonic sequence number; the backend accepts only the newest answer per
 | Input | 4×4 matrix keypad (0–9 student ID, A–D answer, `*` clear, `#` confirm) |
 | Feedback | RGB status LED (idle / connecting / accepted / error) |
 | Power | CR2032 coin cell + slide switch |
-| Boards | Custom 2-layer PCB, 63.4 × 43.2 mm |
+| Boards | Custom 2-layer PCB, 47.8 × 67.4 mm |
+| EDA | Proteus Design Suite (schematic + PCB layout, `PCB.pdsprj`) |
 | Enclosure | 3D-printed housing (SolidWorks design + STEP models) |
 
-| Schematic (KiCad) | PCB layout |
+| Schematic (Proteus) | PCB layout |
 |---|---|
 | <img src="docs/img/schematic.png" width="420"/> | <img src="docs/img/pcb.png" width="420"/> |
 
@@ -144,7 +145,7 @@ PulseNet/
 ├── PulseNet-server/     # Raspberry Pi server
 │   ├── backend/         #   FastAPI app, dashboard (web/), tests, .env.example
 │   └── gateway/         #   BLE gateway (bleak) + debug tools
-├── Device/              # KiCad hardware project (schema + 2-layer PCB)
+├── PCB.pdsprj           # Proteus project — schematic + 2-layer PCB (47.8 × 67.4 mm)
 ├── 3D_DESIGN/           # Enclosure CAD (SolidWorks + STEP)
 ├── docs/img/            # Figures used by this README
 └── .github/workflows/   # CI: backend tests + firmware build

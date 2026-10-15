@@ -10,3 +10,6 @@
 *.db binary
 *.dsn binary
 *.ses binary
+*.pdsprj binary
+*.SLDPRT binary
+*.SLDASM binary
