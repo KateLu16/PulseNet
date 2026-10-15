@@ -8,7 +8,6 @@
 
 ESP32 clickers · BLE · Raspberry Pi gateway · FastAPI dashboard with live analytics
 
-[![CI](https://github.com/KateLu16/PulseNet/actions/workflows/ci.yml/badge.svg)](https://github.com/KateLu16/PulseNet/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![PlatformIO](https://img.shields.io/badge/framework-PlatformIO-orange.svg)](https://platformio.org/)
 [![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688.svg)](https://fastapi.tiangolo.com/)
@@ -156,8 +155,7 @@ PulseNet/
 ### 1. Server (Raspberry Pi or any Linux/macOS box)
 
 ```bash
-cd PulseNet-server
-git clone https://github.com/KateLu16/PulseNet.git   # or copy the folder to the Pi
+git clone https://github.com/KateLu16/PulseNet.git    # or copy the folder to the Pi
 cd PulseNet/PulseNet-server/backend
 
 python -m venv .venv
