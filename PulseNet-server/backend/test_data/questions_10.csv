@@ -1,0 +1,11 @@
+Question,A,B,C,D,Correct Answer
+"BLE viet tat cua tu nao?",Bluetooth Low Energy,Bluetooth Long Range,Broadband Link Enable,Basic Link Ethernet,A
+"Giao thuc nhan gui du lieu thuong dung cho IoT la gi?",MQTT,FTP,SMTP,DNS,B
+"ESP32 ho tro cac mang khong day nao?",WiFi va Bluetooth,Chi WiFi,Chi Ethernet,Chi LoRa,A
+"Cam bien DHT22 do luong gi?",Nhiet do va do am,Chi ap suat,Chi anh sang,Chi am thanh,C
+"LoRa co diem manh nao?",Tieu thu nang luong thap pham vi xa,Toc do truyen rat cao,Gia thanh rat dat,Bao mat ma hoa cao,A
+"Trong he thong PulseNet Raspberry Pi dong vai tro gi?",BLE gateway,Cam bien nhiet do,Man hinh hien thi,Bo cap nguon,D
+"CPU cua ESP32 co dac diem gi?",Dual-core 32-bit,Single-core 8-bit,Khong co CPU,La FPGA,B
+"Cong nghe RFID dung de lam gi?",Nhan dang vat the,Do khoang cach,Truyen video,Do luong sach,A
+"Trong BLE GATT la gi?",Bo thuoc tinh dinh nghia du lieu,Giao thuc dinh tuyen,Thuat toan ma hoa,Chan truyen vat ly,C
+"TFT ST7735 do phan giai la bao nhieu?",160x128,320x240,128x64,640x480,D

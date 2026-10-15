@@ -1,0 +1,15 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.db
+*.sqlite3
+*.log
+*.backup
+*.db.backup
+
+# Secrets — never commit real keys. Copy .env.example to
+# .env on the Pi and fill in the key there.
+.env
+.env.*
+!.env.example

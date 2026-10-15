@@ -1,0 +1,80 @@
+# ===== Secrets & environment =====
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Runtime data & logs
+*.db
+*.sqlite3
+*.log
+uvicorn.log
+
+# ===== PlatformIO / firmware =====
+.pio/
+.pioenvs/
+.piolibdeps/
+*.bin
+*.elf
+*.map
+
+# ===== KiCad =====
+*.bak
+*.bak-*
+fp-info-cache
+*-backups/
+*.kicad_prl-backup
+# Autorouter artifacts
+*.ses
+*.dsn
+drc*.json
+temp-freerouting.dsn
+
+# ===== Proteus =====
+*.pdsprj
+*.pdsprj.*.workspace
+*.EDF
+*.DO
+*.sts
+*.rte
+Project Backups/
+
+# ===== CAD =====
+~WRL*.tmp
+
+# ===== Office / temp / lock files =====
+~$*
+*.tmp
+*.asd
+*.wbk
+Thumbs.db
+desktop.ini
+
+# ===== Reports & internal build tooling (not part of the source) =====
+/_report_build/
+/.pi_diff/
+BAO_CAO_*.docx
+BAO_CAO_*.pdf
+HUONG_DAN_CHAY.md
+DEPLOY_LOCAL_CHANGES.md
+PulseNet_IoT_Project_Context.txt
+PCB.PDF
+
+# ===== OS / editor =====
+.DS_Store
+.idea/
+*.code-workspace
+.history/
+.codex/
