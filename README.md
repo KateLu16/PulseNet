@@ -87,7 +87,7 @@ monotonic sequence number; the backend accepts only the newest answer per
 (student, question) pair and detects duplicate delivery.
 
 <p align="center">
-  <img src="docs/img/ble-protocol.png" alt="BLE protocol" width="560"/>
+  <img src="docs/img/ble-protocol.png" alt="BLE protocol" width="720"/>
 </p>
 
 ## Hardware
@@ -118,7 +118,7 @@ monotonic sequence number; the backend accepts only the newest answer per
   TFT, and a boot splash with the university logo.
 
 <p align="center">
-  <img src="docs/img/state-machine.png" alt="Firmware state machine" width="520"/>
+  <img src="docs/img/state-machine.png" alt="Firmware state machine" width="720"/>
 </p>
 
 ## Server
